@@ -1,0 +1,38 @@
+\documentclass[a4paper,fleqn,12pt]{report}
+
+\input{_preamble}
+\input{_definitions}
+
+\pagestyle{plain}
+\renewcommand{\headrulewidth}{0.0pt}
+
+\setlength{\headheight}{27.53pt}
+
+\makeatletter
+\fancypagestyle{plain}{
+    \fancyhf{}
+    \fancyhead[L]{\thepage}
+    \fancyhead[R]{\textit{\@title}}
+}
+\makeatother
+
+\begin{document}
+
+\input{_titlepage}
+
+\pagestyle{plain}
+
+\input{abstract}
+
+\tableofcontents
+
+\input{introduction}
+\input{background}
+\input{related_work}
+
+\appendix
+
+\bibliographystyle{_}
+\bibliography{_}
+
+\end{document}
