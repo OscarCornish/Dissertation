@@ -20,7 +20,7 @@
 \usepackage[sc]{mathpazo}
 \linespread{1.05}
 \usepackage[T1]{fontenc}
-\usepackage[backgroundcolor=gray!5, hidealllines=true, roundcorner=10pt]{mdframed}
+\usepackage[backgroundcolor=gray!5, roundcorner=10pt]{mdframed}
 \usepackage{multirow}
 \usepackage{subfig}
 \usepackage{textgreek}
@@ -40,4 +40,7 @@
 \newcommand{\supervisor}[1]{\renewcommand{\@supervisor}{#1}}
 \newcommand{\@yearofstudy}[0]{}
 \newcommand{\yearofstudy}[1]{\renewcommand{\@yearofstudy}{#1}}
+\newcommand{\inline}[1]{\texttt{#1}}
 \makeatletter
+
+\surroundwithmdframed{minted}

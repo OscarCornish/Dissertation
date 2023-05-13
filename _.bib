@@ -43,11 +43,40 @@
   booktitle = {Proceedings of the 1st ACM Conference on Computer and Communications Security}
 }
 
+@misc{Arfc826,
+  series       = {Request for Comments},
+  number       = 826,
+  howpublished = {RFC 826},
+  publisher    = {RFC Editor},
+  doi          = {10.17487/RFC0826},
+  url          = {https://www.rfc-editor.org/info/rfc826},
+  author       = {},
+  title        = {An Ethernet Address Resolution Protocol: Or Converting Network Protocol Addresses to 48.bit Ethernet Address for Transmission on Ethernet Hardware},
+  pagetotal    = 10,
+  year         = 1982,
+  month        = nov,
+  abstract     = {The purpose of this RFC is to present a method of Converting Protocol Addresses (e.g., IP addresses) to Local Network Addresses (e.g., Ethernet addresses). This is an issue of general concern in the ARPA Internet Community at this time. The method proposed here is presented for your consideration and comment. This is not the specification of an Internet Standard.}
+}
+
 @phdthesis{aSoCaSaAWA,
   author = {Qilin Qi},
   school = {University of Nebraska - Lincoln},
   title  = {A Study on Countermeasures against Steganography: an Active Warden Approach},
   year   = {2013}
+}
+
+@inproceedings{CCiLANP,
+  author    = {Wolf, Manfred},
+  editor    = {Berson, Thomas A.
+               and Beth, Thomas},
+  title     = {Covert channels in LAN protocols},
+  booktitle = {Local Area Network Security},
+  year      = {1989},
+  publisher = {Springer Berlin Heidelberg},
+  address   = {Berlin, Heidelberg},
+  pages     = {89--101},
+  abstract  = {Encryption is generally understood as being the basic mechanisms for LAN security. However, usage of encryption finds its limitations in case of an unauthorized information flow via covert channels. Some covert storage and timing channels inherent in a LAN's architecture are already described in the literature. This paper takes a more general approach. It shows, that there is a potential of unused bandwidth in commonly used LAN protocols (IEEE 802.2, 802.3, 802.4, 802.5), which might be exploitable as covert channel. The key point is, that exploitation of this potential of unused bandwidth is not a question of a LAN's architecture, but is strongly dependent on the design of its internal interfaces and on its implementations.},
+  isbn      = {978-3-540-46802-8}
 }
 
 @misc{CCitTCPIPPS,
@@ -69,6 +98,18 @@
   doi       = {10.1109/ICRITO51393.2021.9596480}
 }
 
+
+@inproceedings{DAMBCTCST,
+  author    = {Archibald, Rennie and Ghosal, Dipak},
+  booktitle = {2015 IEEE Conference on Communications and Network Security (CNS)},
+  title     = {Design and analysis of a model-based Covert Timing Channel for Skype traffic},
+  year      = {2015},
+  volume    = {},
+  number    = {},
+  pages     = {236-244},
+  doi       = {10.1109/CNS.2015.7346833}
+}
+
 @inproceedings{DIAWAPSCC,
   author = {Wendzel, Steffen and Keller, Jörg},
   year   = {2012},
@@ -87,7 +128,6 @@
   pages     = {32-39},
   doi       = {}
 }
-
 
 @inproceedings{ECoPSSUOCC,
   author    = {Zhu, Yan and Yu, MengYang and Hu, HongXin and Ahn, Gail-Joon and Zhao, HongJia},
@@ -114,6 +154,15 @@
   title  = {IPv6 10 Years Out: An Analysis in Users, Tables, and Traffic},
   year   = {2022},
   url    = {https://labs.ripe.net/author/wilhelm/ipv6-10-years-out-an-analysis-in-users-tables-and-traffic/}
+}
+
+@misc{LIBPCAP,
+  author       = {The Tcpdump Group},
+  howpublished = {\url{https://www.github.com/the-tcpdump-group/libpcap}},
+  title        = {libpcap},
+  year         = {2013},
+  journal      = {GitHub repository},
+  commit       = {f01811ae244642494a433678b39dd505424b9d13}
 }
 
 @inproceedings{PNFD,
@@ -155,36 +204,6 @@
   year         = 1981,
   month        = sep,
   abstract     = {}
-}
-
-@misc{Trfc793,
-  series       = {Request for Comments},
-  number       = 793,
-  howpublished = {RFC 793},
-  publisher    = {RFC Editor},
-  doi          = {10.17487/RFC0793},
-  url          = {https://www.rfc-editor.org/info/rfc793},
-  author       = {},
-  title        = {Transmission Control Protocol},
-  pagetotal    = 91,
-  year         = 1981,
-  month        = sep,
-  abstract     = {}
-}
-
-@misc{Arfc826,
-  series       = {Request for Comments},
-  number       = 826,
-  howpublished = {RFC 826},
-  publisher    = {RFC Editor},
-  doi          = {10.17487/RFC0826},
-  url          = {https://www.rfc-editor.org/info/rfc826},
-  author       = {},
-  title        = {An Ethernet Address Resolution Protocol: Or Converting Network Protocol Addresses to 48.bit Ethernet Address for Transmission on Ethernet Hardware},
-  pagetotal    = 10,
-  year         = 1982,
-  month        = nov,
-  abstract     = {The purpose of this RFC is to present a method of Converting Protocol Addresses (e.g., IP addresses) to Local Network Addresses (e.g., Ethernet addresses). This is an issue of general concern in the ARPA Internet Community at this time. The method proposed here is presented for your consideration and comment. This is not the specification of an Internet Standard.}
 }
 
 @phdthesis{SaW,
@@ -247,6 +266,21 @@
   title  = {The Codebreakers: The Story of Secret Writing}
 }
 
+@misc{Trfc793,
+  series       = {Request for Comments},
+  number       = 793,
+  howpublished = {RFC 793},
+  publisher    = {RFC Editor},
+  doi          = {10.17487/RFC0793},
+  url          = {https://www.rfc-editor.org/info/rfc793},
+  author       = {},
+  title        = {Transmission Control Protocol},
+  pagetotal    = 91,
+  year         = 1981,
+  month        = sep,
+  abstract     = {}
+}
+
 @inproceedings{TWACCS,
   volume    = {},
   number    = {},
@@ -256,28 +290,4 @@
   title     = {Towards Adaptive Covert Communication System},
   doi       = {10.1109/PRDC.2008.26},
   year      = {2008}
-}
-
-@INPROCEEDINGS{DAMBCTCST,
-  author={Archibald, Rennie and Ghosal, Dipak},
-  booktitle={2015 IEEE Conference on Communications and Network Security (CNS)}, 
-  title={Design and analysis of a model-based Covert Timing Channel for Skype traffic}, 
-  year={2015},
-  volume={},
-  number={},
-  pages={236-244},
-  doi={10.1109/CNS.2015.7346833}}
-
-@InProceedings{CCiLANP,
-author="Wolf, Manfred",
-editor="Berson, Thomas A.
-and Beth, Thomas",
-title="Covert channels in LAN protocols",
-booktitle="Local Area Network Security",
-year="1989",
-publisher="Springer Berlin Heidelberg",
-address="Berlin, Heidelberg",
-pages="89--101",
-abstract="Encryption is generally understood as being the basic mechanisms for LAN security. However, usage of encryption finds its limitations in case of an unauthorized information flow via covert channels. Some covert storage and timing channels inherent in a LAN's architecture are already described in the literature. This paper takes a more general approach. It shows, that there is a potential of unused bandwidth in commonly used LAN protocols (IEEE 802.2, 802.3, 802.4, 802.5), which might be exploitable as covert channel. The key point is, that exploitation of this potential of unused bandwidth is not a question of a LAN's architecture, but is strongly dependent on the design of its internal interfaces and on its implementations.",
-isbn="978-3-540-46802-8"
 }

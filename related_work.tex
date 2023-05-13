@@ -1,5 +1,5 @@
 \chapter{Related Work}
-\label{chap:related_work}
+\label{ch:related_work}
 
 \section{Towards Adaptive Covert Communication Systems}
 
@@ -14,6 +14,7 @@ These additional benefits come at a cost, addtional data to transmit, which can 
 Unfortunately, the link provided by paper is dead, and unarchived, so the exact details of the implemented system is unknown, meaning i will not be able to build on the work codebase of this paper.
 
 \section{Dynamic Routing in Covert Channel Overlays Based on Control Protocols}
+\label{sec:DRiCCBoCP}
 
 Inorder to effectively communicate with reliability and assured integrity, a protocol is required. Implementing protocols however requires space, which is not in abundance in covert channels. \cite{DRiCCBoCP} proposes a dynamic sized "micro-protocol", these MP's can be dynamic because of how information about packets and payloads is conveyed. Normal network headers, like those defined in \cite{rfc791} \& \cite{Trfc793}, are designed to work in a "contextless" way, a single packet describes where it is coming to and from, and information about the payload. This is not the case for covert channels, since there are only two parties involved, they can use a "contextful" approach, where the information regarding a communication channel can be managed by the endpoints of the channel as opposed to the data. This allows the microprotocols to be reduced to context updates, and the majority of payloads can be data only (with a small header to declare that it is data). For static channels there is no benefit to microprotocols \cite{DRiCCBoCP}, due to their unchanging context.
 

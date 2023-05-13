@@ -1,0 +1,15 @@
+setsockopt(4, SOL_PACKET, PACKET_ADD_MEMBERSHIP, {mr_ifindex=if_nametoindex("wlo1"), mr_type=PACKET_MR_PROMISC, mr_alen=0, mr_address=}, 16) = 0
+setsockopt(4, SOL_PACKET, PACKET_VERSION, [2], 4) = 0
+setsockopt(4, SOL_PACKET, PACKET_RESERVE, [4], 4) = 0
+setsockopt(4, SOL_PACKET, PACKET_RX_RING, 0x7ffe28ce3250, 28) = 0
+setsockopt(4, SOL_SOCKET, SO_ATTACH_FILTER, {len=1, filter=0x7f81289f2368}, 16) = 0
+setsockopt(4, SOL_SOCKET, SO_ATTACH_FILTER, {len=1, filter=0x55c0c020fe10}, 16) = 0
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on wlo1, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+setsockopt(5, SOL_IP, IP_RECVERR, [1], 4) = 0
+setsockopt(5, SOL_IP, IP_RECVERR, [1], 4) = 0
+1 packet captured
+7 packets received by filter
+0 packets dropped by kernel
+setsockopt(4, SOL_PACKET, PACKET_RX_RING, {tp_block_size=0, tp_block_nr=0, tp_frame_size=0, tp_frame_nr=0}, 16) = -1 EINVAL (Invalid argument)
++++ exited with 0 +++
