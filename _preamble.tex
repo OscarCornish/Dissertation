@@ -1,5 +1,5 @@
 \usepackage[left=1in, right=1in, top=1in, bottom=0.8in,headsep=30pt,headheight=17pt]{geometry}
-\usepackage[utf8x]{inputenc}
+\usepackage{julia-mono-listings}
 \usepackage[UKenglish]{babel}
 \usepackage[UKenglish]{isodate}
 \usepackage{amsmath}
@@ -25,11 +25,13 @@
 \usepackage{subfig}
 \usepackage{textgreek}
 \usepackage{minted}
+\usepackage{nameref}
 \usepackage{FiraMono}
 \usepackage{pdfpages}
 
 \setlength{\parindent}{0mm}
 \setlength{\parskip}{\medskipamount}
+\setcounter{tocdepth}{1}
 
 \cleanlookdateon{}
 
@@ -41,6 +43,14 @@
 \newcommand{\@yearofstudy}[0]{}
 \newcommand{\yearofstudy}[1]{\renewcommand{\@yearofstudy}{#1}}
 \newcommand{\inline}[1]{\texttt{#1}}
+\newcommand{\fullref}[1]{\nameref{#1} (\ref{#1})}
 \makeatletter
+
+\lstdefinelanguage{JuliaLocal}{
+    language = Julia, % inherit Julia lang. to add keywords
+    morekeywords = [1]{@warn}
+    morekeywords = [3]{get_layer_stats}, % define more functions
+    morekeywords = [2]{covert_method, Layer_type}, % define more types and modules
+}
 
 \surroundwithmdframed{minted}

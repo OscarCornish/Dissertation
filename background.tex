@@ -43,14 +43,14 @@ The TCP Acknowledgement field can be exploited using via the three-way handshake
 
 This process can be abused by spoofing the sending address of the client (as the intended covert receiver), and sending a SYN packet with data encoded as the ISN, the server will then respond to the spoofed address (not the orignal sender) with a SYN-ACK packet that has the data encoded as the acknowledgement number. \cite{CCitTCPIPPS}
 
-\begin{figure}[H]
+\begin{figure}[!h]
     \centering
     \includegraphics[width=0.8\textwidth]{fig/TCPACKNormal.png}
     \caption{Normal TCP three-way handshake}
     \label{fig:TCPACKNormal}
 \end{figure}
 
-\begin{figure}[H]
+\begin{figure}[!h]
     \centering
     \includegraphics[width=0.8\textwidth]{fig/TCPACKCC.png}
     \caption{TCP three-way handshake with covert channel}
@@ -67,9 +67,10 @@ The ISN generator is bound to "a (possibly fictious) 32-bit clock that increment
 This channel also leaves a trail of failed / incomplete handshakes, as a consequence of not performing the actual handshake. This can raise flags in wardens that are monitoring the network, and thus make the channel less covert. As a further note, this channel is only possible when the spoofed address is in the same subnet as the recipient, otherwise the packet will be dropped leaving the network. 
 
 \subsection{ARP Beaconing}
+\label{sec:ARP}
 
 The Address Resolution Protocol (ARP) is used to map IP addresses to MAC addresses of devices, as outlined in \cite{Arfc826}. When trying to resolve an address, the resolver must broadcast the request to all hosts on the network, as it doesn't know what its physical address is, and await a response.
 
-This leaves the address (that the resolver is trying to determine the physical address of) available for encoding. A limitation here is that the encoded address must be be on the same network, in a /24 subnet, this leaves only a single byte of data available for encoding, reducing the original capacity by 75%.
+This leaves the address (that the resolver is trying to determine the physical address of) available for encoding. A limitation here is that the encoded address must be be on the same network, in a /24 subnet, this leaves only a single byte of data available for encoding, reducing the original capacity by 75\%.
 
 Requests sent to 'dead' hosts, can raise suspicions in aware wardens, who understand the environment they are operating within \cite{CCUARP}. The redeeming quality of this channel is that, because of the broadcasting nature of the medium, the sender does not need to know the address of the recipient. ARP also play an integral role in network communication, and thus is very unlikely to be blocked by a warden.

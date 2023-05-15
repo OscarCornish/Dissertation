@@ -41,3 +41,17 @@ sequenceDiagram
 	Bob -->> Server: ACK  
 	
 ```
+
+# Integrity Verification
+
+```mermaid
+
+sequenceDiagram
+	Note left of Sender: Get most active<br />host from environment
+	Sender ->> Receiver: Method change (& offset)
+	Receiver ->> Sender: Integrity checksum XOR offset
+	Note left of Receiver: This is embedded as the host byte<br />of the IP address in the ARP Beacon
+	opt Checksum failed
+		Sender -->> Receiver: Discard last chunk (& data)
+	end
+```
