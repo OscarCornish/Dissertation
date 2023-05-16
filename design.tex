@@ -61,7 +61,28 @@ Eventually I decided that both implementations could be used in the framework, t
 
 \section{Packet processing}
 
-\dots
+When packets are captured, we want to process them into objects so we can idomatically access their properties. Specifically we want to process them into a \inline{Packet} object, that holds the capture header, and a \inline{Layer} object. The layer is made up of a \inline{Layer\_type} enum, the layer header, and the payload. The payload can be either another \inline{Layer} or a \inline{Vector\{UInt8\}}.
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{fig/packet_structure.png}
+    \caption{Packet structure}
+    \label{fig:packet_structure}
+\end{figure}
+
+A function, \inline{packet\_from\_pointer} takes the pointer given by libpcap, and the length of the packet. It iteratively processes the packet, creating an \inline{Layer} struct of each layer, and appending to the previous \inline{Layer}, incrementing the \inline{Layer\_type} enum as it goes. The headers defined have two helper functions to assist this process, \inline{get\_offset} which returns the size of the header, and \inline{get\_protocol} which returns the protocol embedded in the header, allowing the next layer to be processed.
+
+The \inline{Header} class is an abstract type, generalising all headers, it should also be noted the packet definition looks like this:
+
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+struct Packet
+    cap_header::Capture_header
+    layer::Layer{Ethernet_header}
+end
+\end{lstlisting}
+
+To assist this process there is a tree defined that maps the protocol number to the header type, and the protocols in the layer above it. This makes the addition of protocols easy for the user, it is mostly just copying the structure of the protocol from the relevant header file, adding it to the tree, and two simple helper functions that just access fields.
+
 
 \section{The Queue}
 \label{sec:queue}
@@ -113,7 +134,12 @@ One of my goals for the project was to allow any type of covert channel to be us
 
 I implemented a rudimentary query system, that allowed for querying of properties captured by the framework (known header values), these properties could be combined with simple logical operators (AND, OR) to sufficiently complex queries. An extract of Faucet's documentation gives an example of what these queries look like:
 
-[ADD DOC EXAMPLE]
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=\textwidth]{fig/docs_query_queue.png}
+    \caption{A snippet from the Faucet documentation}
+    \label{fig:doc_snippet}
+\end{figure}
 
 \section{The target (Arrangemnt)}
 \label{sec:target}
@@ -309,7 +335,7 @@ A sentinel signal is sent to begin and end communication, this way they can both
 
 Data is sent in chunks, a chunk is effectively a buffer of data that has not had its integrity verified yet, once the verification of the chunk has passed, it can be commited to the main buffer, and the chunk can be emptied ready for the next set of data. Both the sender and receiver keep track of this chunk so the state of communication is atomic between the two parties.
 
-Inorder to implement these protocls effectively, using the contextless design proposed in \fullref{sec:DRiCCBoCP}, packets need to desribe their nature, I decided to implement this using a single bit, at the start of the payload. 0 or 1 indicate whether the packet is data or metadata, respectively. Protocols are implemented as metadata, and are of adaptive length, the size of these protocols is a function of the number of underlying channels that may be used. The minimum channel size is $1 + \floor{log_2{M_c + 1}}$ where $M_c$ is the number of underlying covert methods.
+Inorder to implement these protocls effectively, using the contextless design proposed in \fullref{sec:DRiCCBoCP}, packets need to desribe their nature, I decided to implement this using a single bit, at the start of the payload. 0 or 1 indicate whether the packet is data or metadata, respectively. Protocols are implemented as metadata, and are of adaptive length, the size of these protocols is a function of the number of underlying channels that may be used. The minimum channel size is $1 + \lfloor log_2{M_c + 1} \rfloor$ where $M_c$ is the number of underlying covert methods.
 
 For some protocols, it is beneficial to use more than the minimum channel size, for example, when verifying the integrity of a channel an offset can follow the protocol. The offset is assumed to be 0 if it is not present, but when it is present it improves the covertness of the channel, exactly why this is the case is discussed in \fullref{sec:integrity}. For the chunk discarding protocol, the space following the protocol is filled with payload data, this is because the sender will have to resend the previous data segments and without doing this there would be repeated fields, which would be suspicious to an observer.
 

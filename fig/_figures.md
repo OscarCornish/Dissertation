@@ -55,3 +55,36 @@ sequenceDiagram
 		Sender -->> Receiver: Discard last chunk (& data)
 	end
 ```
+
+# Packet structure
+
+```mermaid
+classDiagram
+	class Packet{
+		+Capture_header cap_header
+		+Layer layer
+	}
+	Packet *-- Layer
+	Packet *-- Capture_header
+	class Capture_header{
+		+Timeval timestamp
+		+Int32 capture_length
+		+Int32 length
+	}
+	class Layer {
+		+Layer_type layer
+		+Header header
+		+payload
+	}
+	Layer *-- Header
+	class Header
+	Ethernet_header <|-- Header
+	ARP_header <|-- Header
+	class Ethernet_header{
+		+HWADDR destination
+		+HWADDR source
+		+UInt16 protocol
+	}
+	class ARP_header { ... }
+```
+
