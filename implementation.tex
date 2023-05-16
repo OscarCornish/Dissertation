@@ -3,9 +3,9 @@
 \section{Algorithm implementation}
 \label{sec:algorithm_impl}
 
-The input variables, and output of the implementation can be found in \fullref{sec:decision_algorithm}. This section will cover the entire algorithm, getting from the input variables to the output.
+The input variables and output of the implementation can be found in \fullref{sec:decision_algorithm}. This section will cover the entire algorithm, getting from the input variables to the output.
 
-This function is written in Julia, making use of its ability to use unicode characters in variables names, allowing me to use the same mathematical notation in the code as in the design documenation. The following is an extract from the source code of the framework (\inline{/src/covert\_channels/covert\_channels.jl})
+This function is written in Julia, making use of its ability to use Unicode characters in variable names, allowing me to use the same mathematical notation in the code as in the design documentation. The following is an extract from the source code of the framework (\inline{/src/covert\_channels/covert\_channels.jl})
 
 \begin{lstlisting}[language=JuliaLocal, style=julia]
 function method_calculations(covert_methods::Vector{covert_method}, env::Dict{Symbol, Any}, Eₚ::Vector{Int64}=[], current_method::Int64=0)::NTuple{2, Vector{Float64}}
@@ -92,6 +92,6 @@ function method_calculations(covert_methods::Vector{covert_method}, env::Dict{Sy
 end
 \end{lstlisting}
 
-The \inline{method\_calculations} function only does the calculations, not the selection of the best method, that is done by a function that wraps this one and returns an index $i$ and a rate $R_i$ for the highest scoring method ($S_i$).
+The \inline{method\_calculations} function only does the calculations, not the selection of the best method, which is done by a function that wraps this one and returns an index $i$ and a rate $R_i$ for the highest scoring method ($S_i$).
 
 \section{Integrity check}
