@@ -19,9 +19,8 @@ This approach is standalone; it does not require external libraries to operate, 
 
 There is very little code complexity involved in setting up a raw socket:
 
-\begin{listing}
-    \vspace{0.5cm}
-    \begin{minted}{julia}
+\begin{figure}[h]
+\begin{lstlisting}[language=JuliaLocal, style=julia]
 # Capture the entire packet (AF -> Address Family)
 const AF_PACKET = Cint(17) 
 # Raw listening socket
@@ -35,11 +34,10 @@ socket = fdio(ccall(:socket,
     AF_PACKET, SOCK_RAW, ETH_P_ALL # Arguments
 ))
 packet = read(socket)
-    \end{minted}
-    \caption{Raw socket listener implementation}
-    \label{lst:raw_sock}
-\end{listing}
-
+\end{lstlisting}
+\caption{Raw socket listener implementation}
+\label{fig:raw_sock}
+\end{figure}
 Julia will read the socket pipe until an EOF is found, which marks the end of a packet; this lightweight and simplistic implementation means the construction of this listener is incredibly cheap, and thus it is very versatile.
 
 \subsection{libpcap}
@@ -47,19 +45,20 @@ Julia will read the socket pipe until an EOF is found, which marks the end of a 
 libpcap is a cross-platform library for low-level network monitoring \cite{libpcap}. 
 There are several benefits to using libpcap, the first being the ease of implementation, libpcap provides a simple API for capturing packets, allowing for a callback function to be called when a packet is captured, this function is passed the capture header, packet pointer, and user data if required.
 
-Because of Julia's ability to integrate seamlessly with C and its libraries, the callback function could be written in Julia, removing the need to write any C code. The benefit of using a library is that it is appropriately optimised. libpcap creates a memory-mapped ring buffer for asynchronous packet reception [PACKET\_RX\_RING - https://man7.org/linux/man-pages/man7/packet.7.html], this allows the user space to read the packet data without the need for system calls, and the shared buffer also reduces the number of copies required.
+Because of Julia's ability to integrate seamlessly with C and its libraries, the callback function could be written in Julia, removing the need to write any C code. The benefit of using a library is that it is appropriately optimised. libpcap creates a memory-mapped ring buffer for asynchronous packet reception \cite{packet_7}, this allows the user space to read the packet data without the need for system calls, and the shared buffer also reduces the number of copies required.
 
 While the platform-independent nature of libpcap is beneficial, the scope of this project is limited to Linux, and thus this will not be included in my evaluation.
 
 \subsection{Conclusion}
 
-Both raw sockets and libpcap are viable options for packet capture, however, libpcap has a few advantages, the factor that swayed my decision was the support for the Berkeley Packet Filter (BPF). BPFs are register-based "filter machines" [The BSD Packet Filter] that make filtering packets incredibly efficient, this is particularly useful for this project as it allows for the filtering of packets to be done in the kernel, which reduces the number of packets that need to be processed by the program. Specifically, this means the receiver can filter traffic so it only has to process packets that are destined for it, reducing the overhead.
+Both raw sockets and libpcap are viable options for packet capture, however, libpcap has a few advantages, the factor that swayed my decision was the support for the Berkeley Packet Filter (BPF). BPFs are register-based "filter machines" \cite{BPF} that make filtering packets incredibly efficient, this is particularly useful for this project as it allows for the filtering of packets to be done in the kernel, which reduces the number of packets that need to be processed by the program. Specifically, this means the receiver can filter traffic so it only has to process packets that are destined for it, reducing the overhead.
 
 \subsection{Note}
 
 Eventually, I decided that both implementations could be used in the framework, the raw socket was used to capture packets for the sender, without disrupting the main queue of packets. The additional code complexity of searching the queue did not outweigh the overhead of opening a raw socket, there are also some other benefits to using the raw socket, but I will discuss them in context in \ref{sec:integrity_impl}.
 
 \section{Packet processing}
+\label{sec:packet_processing}
 
 When packets are captured, we want to process them into objects so we can idiomatically access their properties. Specifically, we want to process them into a \inline{Packet} object, that holds the capture header, and a \inline{Layer} object. The layer is made up of a \inline{Layer\_type} enum, the layer header, and the payload. The payload can be either another \inline{Layer} or a \inline{Vector\{UInt8\}}.
 
@@ -89,7 +88,7 @@ To assist this process there is a tree defined that maps the protocol number to 
 
 The queue is essential to the operation of the framework, it is how the packets are put by the listening thread, and retrieved by the main thread for processing.
 
-Initially, I was using a \inline{Channel} data structure, it is a thread-safe, waitable, First-in-First-out queue [JULIADOCS] that worked for the most part, however, it introduced a bug into my codebase that meant the listening thread would block the main thread while it was waiting for packets, thus the covert channel would not run in a silent environment.
+Initially, I was using a \inline{Channel} data structure, it is a thread-safe, waitable, First-in-First-out queue \cite{julia} that worked for the most part, however, it introduced a bug into my codebase which meant the listening thread would block the main thread while it was waiting for packets, thus the covert channel would not run in a silent environment.
 
 While this isn't a huge problem, since a covert channel is quite exposed on a silent network, it is not ideal. I eventually deduced that I was improperly accessing the properties of the structure, I was attempting to get the whole queue without removing the items, so I just took it from the underlying array. Unfortunately, the \inline{Channel} is locked by default, and thus the main thread was blocked until the listening thread pushed something to the queue.
 
@@ -121,10 +120,10 @@ put!(queue, packet)
         \end{minted}
     \captionof{listing}{New "CircularChannel" implementation}
     \end{minipage}
-\label{lst:queue_comparison}
 \end{figure}
+\label{lst:queue_comparison}
 
-By overloading the \inline{put!} and \inline{take!} functions, I was able to implement their functionality for my new data structure, this meant for most of the code all I had to do was replace the type annotations of \inline{Channel} with \inline{CircularChannel}. This is of course except for the packet listener (queue producer), whose changes can be seen in \ref{lst:queue_comparison}, and the \inline{get\_queue\_data} function that I used to improperly access the queue, thanks to my use of a central function for accessing this queue data I was able to change the implementation of the function without having to change the code that called it. I did this by creating a type convert function for the \inline{CircularChannel\{T\}} to \inline{Vector\{T\}}, where T is any data type, since I implemented this in a thread-safe way, I was able to use altered \inline{get\_queue\_data} function to access the queue data without blocking the main thread.
+By overloading the \inline{put!} and \inline{take!} functions, I was able to implement their functionality for my new data structure, this meant for most of the code all I had to do was replace the type annotations of \inline{Channel} with \inline{CircularChannel}. This is of course except for the packet listener (queue producer), whose changes can be seen in the comparison above (\ref{lst:queue_comparison}), and the \inline{get\_queue\_data} function that I used to improperly access the queue, thanks to my use of a central function for accessing this queue data I was able to change the implementation of the function without having to change the code that called it. I did this by creating a type convert function for the \inline{CircularChannel\{T\}} to \inline{Vector\{T\}}, where T is any data type, since I implemented this in a thread-safe way, I was able to use altered \inline{get\_queue\_data} function to access the queue data without blocking the main thread.
 
 I efficiently achieved this waiting using \inline{Conditions}, which are locks that implement \inline{wait} and \inline{notify} methods that block (reducing resource usage) and release threads, respectively, based on the status of the condition. This allows my main thread to wait for the listening thread to push a packet to the queue, and then continue processing the packet (for the receiver only).
 
@@ -141,10 +140,10 @@ I implemented a rudimentary query system, that allowed for querying of propertie
     \label{fig:doc_snippet}
 \end{figure}
 
-\section{The target (Arrangement)}
+\section{The arrangement}
 \label{sec:target}
 
-Covert communication is reliant on a preshared arrangement \cite{DoCCaS}, this arrangement is a set of parameters that both parties will assume the other is using, it contains the following information:
+Covert communication is reliant on a preshared arrangement \cite{DoCCaS}, this arrangement is a set of parameters that both parties will assume the other is using hereon called the "target", it contains the following information:
 
 \begin{itemize}
     \item The IP Address of the target.
@@ -154,7 +153,7 @@ Covert communication is reliant on a preshared arrangement \cite{DoCCaS}, this a
 \end{itemize}
 
 The IP address is where the sender will send the packets and the address that the receiver will listen on. In theory, this address does not have to be the address of the target, as long as the target can see that endpoint, but I cannot test this due to limitations in the testing environment. The covert methods are the channels that will be used for communication, they are referenced by their index in the array of covert methods, and thus the order of the covert methods is important.
-The AES pre-shared key is used to encrypt (and subsequently decrypt) the data, and the initial vector is used to initialise the AES encryption.
+The AES pre-shared key is used to encrypt (and subsequently decrypt) the data, and the initial vector is used to initialise the AES encryption, both communication parties must know these values \cite{GUCCA}.
 
 \section{Sending packets}
 \label{sec:sending_packets}
@@ -165,7 +164,7 @@ For example, in an IP header, source and destination fields will default to the 
  
 Since the filling of these additional fields is done at execution time, a "skeleton" packet can be created that outlines a basic packet, then this skeleton can be used multiple times without having random fields being static, it is also useful with packet checksums, as this burden is not passed to the user. I make use of this functionality in the use of covert modules, as outlined in \fullref{sec:covert_modules}.
 
-The packets themselves are sent over a raw socket, this allows for the packet to be sent without the kernel imposing checks on its validity (such as the checksum), this is important for the operation of some covert channels, as they create packets that would otherwise be dropped by the kernel (sometimes because of firewalls). For a packet to be sent over a raw socket at the link layer (ethernet) it needs to be sent with a \inline{sockaddr\_ll} struct, outlined in [man Packet(7)] the majority of these fields are not required, or are unlikely to change (The physical layer protocol) and thus can be hardcoded, only two fields need to be created populated dynamically, the interface index and the destination mac address. The interface used is the one that the queue listens on, and the destination MAC can be taken from the packet.
+The packets themselves are sent over a raw socket, this allows for the packet to be sent without the kernel imposing checks on its validity (such as the checksum), this is important for the operation of some covert channels, as they create packets that would otherwise be dropped by the kernel (sometimes because of firewalls). For a packet to be sent over a raw socket at the link layer (ethernet) it needs to be sent with a \inline{sockaddr\_ll} struct, outlined in \cite{packet_7} the majority of these fields are not required, or are unlikely to change (The physical layer protocol) and thus can be hardcoded, only two fields need to be created populated dynamically, the interface index and the destination mac address. The interface used is the one that the queue listens on, and the destination MAC can be taken from the packet.
 
 The packets can then be sent to the raw socket using the \inline{sendto} function, taking the socket, packet and \inline{sockaddr\_ll} as arguments.
 
@@ -335,7 +334,7 @@ A sentinel signal is sent to begin and end communication, this way they can both
 
 Data is sent in chunks, a chunk is effectively a buffer of data that has not had its integrity verified yet, once the verification of the chunk has passed, it can be committed to the main buffer, and the chunk can be emptied ready for the next set of data. Both the sender and receiver keep track of this chunk so the state of communication is atomic between the two parties.
 
-In order to implement these protocols effectively, using the contextless design proposed in \fullref{sec:DRiCCBoCP}, packets need to describe their nature, I decided to implement this using a single bit, at the start of the payload. 0 or 1 indicate whether the packet is data or metadata, respectively. Protocols are implemented as metadata and are of adaptive length, the size of these protocols is a function of the number of underlying channels that may be used. The minimum channel size is $1 + \lfloor log_2{M_c + 1} \rfloor$ where $M_c$ is the number of underlying covert methods.
+In order to implement these protocols effectively, using the contextual design proposed in \cite{rfc1144}, packets need to describe their nature, I decided to implement this using a single bit, at the start of the payload. 0 or 1 indicate whether the packet is data or metadata, respectively. Protocols are implemented as metadata and are of adaptive length, the size of these protocols is a function of the number of underlying channels that may be used. The minimum channel size is $1 + \lfloor log_2{M_c + 1} \rfloor$ where $M_c$ is the number of underlying covert methods.
 
 For some protocols, it is beneficial to use more than the minimum channel size, for example, when verifying the integrity of a channel an offset can follow the protocol. The offset is assumed to be 0 if it is not present, but when it is present it improves the covertness of the channel, exactly why this is the case is discussed in \fullref{sec:integrity}. For the chunk discarding protocol, the space following the protocol is filled with payload data, this is because the sender will have to resend the previous data segments and without doing this there would be repeated fields, which would be suspicious to an observer.
 
@@ -344,17 +343,21 @@ For protocols that do not have auxiliary data to be sent with them, the followin
 
 \subsection{Protocol compression}
 
+It is important to minimise the size of micro protocol headers, so they are negligible to the size of the payload \cite{DRiCCBoCP}, we will achieve this by compressing the protocols.
+
 The compression technique outlined in \fullref{sec:DRiCCBoCP} is Huffman coding, which is a simple lossless compression technique that maps the protocols to a number, then the binary representation of that number can be used, however, I do not think this method of compression is best suited to the framework. The problem with Huffman coding arises when the distribution of protocol is not uniform, In my case the majority of traffic will be data, and thus by using only the first bit to declare it as data, the rest of them will be data. The consequence of this is the metaprotocols will be slightly larger than otherwise, but since by their nature they are less frequent than data, this is a worthwhile tradeoff.
 
 \subsection{consequence of this approach}
+\label{sec:mp_consequence}
 
 Unfortunately, using a single bit to denote data means that the original payload is not taken in whole bytes, A packet of n bits will carry n-1 bits of data. This creates an issue when reading the payload because the bits must be read out of alignment. This problem is exacerbated by the unknown nature of the packets pre-communication, as some channels have higher bit capacities, and along with the introduction of chunk retransmission, it is not feasible to precompute the possible payloads. The solution I found for this problem was to store the payload as a bitstring, the base two representation of the number in string form, and then read the desired number of bits from the string. There is a time and space cost of storing the payload like this, and in hindsight using a \inline{BitVector} would be more performant, but this cost is negligible and the code is easier to follow than using bit shifts to read the bits.
 
 \section{Transmission padding}
+\label{sec:transmission_padding}
 
 The common approach to adding bits of padding is to append the data with a 1 and fill any remaining space with 0's, the cost of this (minimum number of bits added to the payload) is 1, which is the lowest possible. While this application works well for non-covert scenarios, it can create, particularly suspicious-looking payloads, the worst-case scenario of this is an entire packet with a single 1 followed by 0's to fill capacity.
 
-In this paper I will propose a solution that is better suited to covert channels, it does have a higher space cost, however, the benefit is more of the data is random. The cost is logarithmically proportional to the size of the data, although if the data has fixed size increments (a common one would be bytes as most payloads will be byte data) then the length can be divided by this number to reduce its costs. In my case, the AES encryption means that the data is a multiple of the key size (128 bits) so the equation of my cost complexity would be $log_2(l/128)$ where $l$ is the length of the encrypted data.
+In this paper I will propose a solution that is better suited to covert channels, it does have a higher space cost, however, the benefit is more of the data is random, and sometimes the proficiency of a protocol must be sacrificed in favour of covertness \cite{oCDCCEDNA}. The cost is logarithmically proportional to the size of the data, although if the data has fixed size increments (a common one would be bytes as most payloads will be byte data) then the length can be divided by this number to reduce its costs. In my case, the AES encryption means that the data is a multiple of the key size (128 bits) so the equation of my cost complexity would be $log_2(l/128)$ where $l$ is the length of the encrypted data.
 
 [HOW PADDING WORKS DIAGRAM]
 
@@ -365,7 +368,7 @@ Both of these padding methods will be tested and compared in \fullref{sec:paddin
 \section{Verifying communication integrity}
 \label{sec:integrity}
 
-Verifying the integrity of communication is essential to the operation of the framework, it allows the communication channel to remediate any errors that may occur and thus allows for the communication to be more reliable. The integrity of the communication is calculated using an 8-bit cyclic redundancy check (CRC-8). This allows errors to be recovered by using the discard chunk protocol (outlined in \fullref{sec:microprotocols}).
+Verifying the integrity of communication is essential to the operation of the framework, it allows the communication channel to remediate any errors that may occur and thus allows for the communication to be more reliable, while the framework does use encryption, encryption does not ensure integrity \cite{GUCCA}. The integrity of the communication is calculated using an 8-bit cyclic redundancy check (CRC-8). This allows errors to be recovered by using the discard chunk protocol (outlined in \fullref{sec:microprotocols}).
 
 This requires the receiver to be able to communicate the integrity of the message back to the sender, so the sender can decide whether to resend the chunk or not. In order to do this the medium of communication must be both undisruptable and broadcasted.
 
@@ -386,9 +389,12 @@ Where ARP is not applicable, a different means of communication must be used, ho
 The verification process is a challenge and response protocol, the sender will send a challenge to the receiver, and the receiver will respond with the integrity of the message. Verification of data chunks is performed when the method change protocol is sent, this is when the communication medium changes and thus the framework seeks to verify that the previous channel was successful. This does delay the verification of the data until the start of the next method transmission, but it does mean that the verification can be can become an implicit part of the method change protocol, which keeps the minimum channel size low, and reduces the number of packets sent. This method still allows a 
 the challenge to be performed without changing the channel, by sending the method change protocol to the current channel index, this is useful for continual verification of the channel, but it does increase the number of packets sent.
 
+\subsection{Improving the covertness of the response}
+\label{sec:improving_arp}
+
 To improve the covertness of the ARP Beacon, the sender will (if the channel is large enough) provide an offset to the receiver, and the receiver will XOR this with the result of the integrity check. Since the sender knows the correct integrity of the data, it can find an active host on the network and XOR the integrity with the host byte, the outcome of this is an offset that the receiver can use to make its ARP request look valid to an observer. This is only possible if the channel is large enough, but if it is not the receiver will assume no offset.
 
-With the offset, the ARP Beacon is much more covert and less prone to detection from Aware active wardens. However, this is only true when the integrity of the data is correct, if the data is corrupted, then the request will point to the wrong address, which could raise suspicion. Unfortunately, the receiver cannot determine whether the integrity is correct without sending its response, so this is a tradeoff that must be made.
+With the offset, the ARP Beacon is much more covert and less prone to detection from Aware active wardens as the adversary knows it is plausible that the channel is for legitimate use and not a channel \cite{GUCCA}. However, this is only true when the integrity of the data is correct, if the data is corrupted, then the request will point to the wrong address, which could raise suspicion. Unfortunately, the receiver cannot determine whether the integrity is correct without sending its response, so this is a tradeoff that must be made.
 
 Some addresses are blacklisted from being used, for example, the address of the sender (as they are in communication, the receiver could send an ARP packet that is unrelated to the covert channel, which could cause issues). The broadcast and network addresses are also blacklisted, as they are not valid hosts on the network, and thus would be suspicious to an observer. 
 
@@ -403,7 +409,13 @@ Since the sender knows what the response is supposed to be, it can await the res
 
 This challenge and response process can be performed irrespective of the underlying covert channel, but it might require limitations on the environment (just as ARP requires a local network). 
 
-\section{Communication failures}
+\subsection{The discard chunk protocol}
+
+The discard chunk protocol tells the receiver to revert the last chunk commit, as the sender determined it was not valid. The receiver assumes the integrity is correct because most of the time it is, and sending a packet to the sender to verify that the last verification was correct is unnecessary, so instead the receiver will assume the last verification was correct unless specifically informed otherwise by the sender, this reduces the total number of microprotocols which is important to reduce the number of packets sent \cite{DRiCCBoCP}.
+
+The sender must then resend the previous chunk of data again, but this would cause an issue to arise as the fields of the packets will also be identical, in some cases this can cause an active warden to detect the communication, to prevent this we use utilise the remaining space (the space after the microprotocols) in the packet by filling it with data, this data offsets the bits being sent (by however much space is available) and thus the following packets will have different fields.
+
+\section{Channel failures}
 
 There are scenarios where the channel for communication no longer works, this could be of a change in the environment or a warden that has prevented the channel. In these scenarios the framework must be able to recover the communication effort, the sender and receiver need a sort of fallback channel that they can use to restart communication. However, if the fallback channel was the one being blocked then the communication would have to end, even if other channels were viable.
 

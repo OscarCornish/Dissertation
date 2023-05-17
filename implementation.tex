@@ -1,11 +1,72 @@
 \chapter{Implementation}
 
+\section{Implementation of covert modules}
+\label{sec:impl_cov_mod}
+
+The following is an extract from the source code of the framework (\url{/src/covert_channels/covert_channels.jl}) that shows the implementation of a covert module.
+
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+ipv4_identifaction::covert_method{:IPv4_Identification} = covert_method(
+    "IPv4_Identification",
+    Layer_type(3), # network
+    "IPv4_header",
+    8,
+    16, # 2 bytes / packet
+)
+
+# Init function for IPv4_Identification
+function init(::covert_method{:IPv4_Identification}, net_env::Dict{Symbol, Any})::Dict{Symbol, Any}
+    target_mac, target_ip = net_env[:dest_first_hop_mac], net_env[:dest_ip].host
+    return Dict{Symbol, Any}(
+        :payload => Vector{UInt8}("Covert packet!"), # not a real payload
+        :env => net_env,
+        :network_type => IPv4::Network_Type,
+        :transport_type => TCP::Transport_Type,
+        :EtherKWargs => Dict{Symbol, Any}(
+            :dest_mac => target_mac,
+        ),
+        :NetworkKwargs => Dict{Symbol, Any}(
+            :dest_ip => target_ip,
+        )
+    )
+end
+
+# Encode function for IPv4_Identification
+function encode(::covert_method{:IPv4_Identification}, payload::UInt16; template::Dict{Symbol, Any})::Dict{Symbol, Any}
+    template[:NetworkKwargs][:identification] = payload
+    return template
+end
+encode(m::covert_method{:IPv4_Identification}, payload::String; template::Dict{Symbol, Any})::Dict{Symbol, Any} = encode(m, parse(UInt16, payload, base=2); template=template)
+
+# Decode function for IPv4_Identification
+decode(::covert_method{:IPv4_Identification}, pkt::Packet)::UInt16 = pkt.payload.payload.header.id
+\end{lstlisting}
+
+This implementation makes use of Julia's multiple dispatch system, allowing for different functions to be called depending on the type of arguments. the three defined functions \inline{init}, \inline{encode}, and \inline{decode} are called with the covert channel as the first argument.
+
+I designed the covert channels to be a composite parametric type, where the type parameter is the type of channel, this prevents ambiguity when the multiple dispatch system is used. The parametric type definition looks like this:
+
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+struct covert_method{Symbol}
+    name::String
+    layer::Layer_type
+    type::String # What packet type are we aiming for?
+    covertness::Int8 # 1 - 10
+    payload_size::Int64 # bits / packet
+    covert_method(name::String, layer::Layer_type, type::String, 
+    
+    covertness::Int64, payload_size::Int64)::covert_method{Symbol} = new{Symbol(name)}(name, layer, type, Int8(covertness), payload_size)
+end
+\end{lstlisting}
+
+This struct instantiation implicitly converts the name of the covert channel to a symbol, which is used as the type parameter.
+
 \section{Algorithm implementation}
 \label{sec:algorithm_impl}
 
 The input variables and output of the implementation can be found in \fullref{sec:decision_algorithm}. This section will cover the entire algorithm, getting from the input variables to the output.
 
-This function is written in Julia, making use of its ability to use Unicode characters in variable names, allowing me to use the same mathematical notation in the code as in the design documentation. The following is an extract from the source code of the framework (\inline{/src/covert\_channels/covert\_channels.jl})
+This function is written in Julia, making use of its ability to use Unicode characters in variable names, allowing me to use the same mathematical notation in the code as in the design documentation. The following is an extract from the source code of the framework (\url{/src/covert_channels/covert_channels.jl})
 
 \begin{lstlisting}[language=JuliaLocal, style=julia]
 function method_calculations(covert_methods::Vector{covert_method}, env::Dict{Symbol, Any}, Eₚ::Vector{Int64}=[], current_method::Int64=0)::NTuple{2, Vector{Float64}}
@@ -95,3 +156,93 @@ end
 The \inline{method\_calculations} function only does the calculations, not the selection of the best method, which is done by a function that wraps this one and returns an index $i$ and a rate $R_i$ for the highest scoring method ($S_i$).
 
 \section{Integrity check}
+\label{sec:integrity_impl}
+
+The integrity check process has two main parts, the sender, and the receiver. For both of the processes, the integrity is calculated using the same function (\url{/src/utils.jl}):
+
+\begin{figure}[h]
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+function integrity_check(chunk::String)::UInt8
+    padding = 8 - (length(chunk) % 8)
+    # Payload may not be byte aligned, so pad it
+    chunk *= padding == 8 ? "" : "0"^padding
+    return crc(CRC_8)([parse(UInt8, chunk[i:i+7], base=2) for i in 1:8:length(chunk)])
+end
+\end{lstlisting}
+\caption{\inline{integrity\_check} function}
+\end{figure}
+
+This function uses a CRC8 checksum, but in reality, its implementation is not important, the only requirements are that the function is deterministic and that a single byte is returned. A consideration for choosing such a function should be its behaviour when there is not a guarantee that the current chunk is a multiple of 8 bits, as discussed in \fullref{sec:mp_consequence}, if the checksum function requires bytes, then the chunk must be padded in a deterministic way.
+
+To prevent inconsistencies in the check, the same function is used by both the sender and receiver, by putting the function in the shared \inline{utils.jl} file.
+
+The sender needs to issue the challenge and receive the response. The challenge piggybacks the method change protocol, so it just needs to await the response from the receiver. It does this by opening a raw socket and listening for an arp packet from the target to the known host it used to create the offset. We can see the challenge and response process in the \inline{send\_covert\_payload} function (found in \url{/src/outbound/packets.jl}) in figure \ref{fig:chal_resp}.
+
+\begin{figure}[h]
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+# Get the current integrity, if we have used final padding, append it
+integrity = integrity_check(bits[chunk_pointer:pointer-1] * final_padding)
+# Get a known host for the integrity check
+known_host = get_local_net_host(net_env[:queue], net_env[:src_ip], host_blacklist)
+# Send the challenge
+send_method_change_packet(method, method_index, integrity ⊻ known_host, net_env, method_kwargs)
+
+...
+
+
+# Await the response
+if await_arp_beacon(net_env[:dest_ip], known_host, check_timeout) # Success
+    # reset failures
+    protocol_failures = 0
+    @debug "Integrity check passed" method=method.name integrity known_host integrity ⊻ known_host
+    # reset chunk pointer
+    chunk_pointer = pointer
+    # update last verified integrity (+ length)
+    last_integrity = (chunk_pointer, integrity)
+else
+    ...
+\end{lstlisting}
+\caption{Challenge and response process implementation}
+\label{fig:chal_resp}
+\end{figure}
+
+Once the packet is sent, the sender enters the \inline{await\_arp\_beacon} function, providing the IP address of the target (which we expect the source of the ARP request to be), the known host (which we extract from the local network (line 4), as discussed in \fullref{sec:improving_arp}), and a timeout of how long to wait, in seconds. The timeout is largely unimportant as the function will return as soon as it receives the expected packet, which is normally a fraction of a second. The function can be seen in figure \ref{fig:await_arp_beacon}.
+
+\begin{figure}[h]
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+    function await_arp_beacon(ip::IPv4Addr, target::UInt8, timeout::Int64=5)
+    # Get a fresh socket to listen on
+    socket = get_socket(AF_PACKET, SOCK_RAW, ETH_P_ALL)
+    start = time_ns()
+    while (time_ns() - start) < timeout * 1e9
+        # Read a packet
+        raw = read(socket)
+        # Confirm it is more than the minimum size of an ARP packet
+        if length(raw) >= 42
+            # Check it matches our boilerplate ARP
+            if raw[ARP_SEQUENCE_SLICE] == ARP_SEQUENCE
+                # Check it is from the source we are looking for
+                if raw[ARP_SRC_SLICE] == _to_bytes(ip.host)
+                    # Check it is to the target we are looking for
+                    if raw[ARP_DEST_SLICE][4] == target
+                        return true
+                    end
+                    push!(heard, raw[ARP_DEST_SLICE][4])
+                end
+            end
+        end
+    end
+    return false
+end
+\end{lstlisting}
+\caption{\inline{await\_arp\_beacon} function}
+\label{fig:await_arp_beacon}
+\end{figure}
+
+\subsection{Final integrity check}
+
+An oversight of the integrity process outlined in the \fullref{sec:integrity} section is the last chunk does not get verified, this undermines the entire integrity of the entire process, the solution was to add a final integrity check. Because of the design of the packet-sending function, a loop that iterates the payload, verifying the last chunk of data becomes less trivial, as we want to perform the check after the loop, but if the check fails we would have to return to the loop, this would require a confusing nested loop structure and would be difficult to read, especially when the already complex function is considered. To solve this problem, I utilised the \inline{@goto} and \inline{@label} macros provided by Julia, this creates an unconditional jump to a label, allowing me to jump back to the integrity check when combined with a flag \inline{finished} that indicates there is no more data to send if the integrity check succeeds with the flag set, it will break the loop, otherwise, it will resend the chunk as usual.
+
+This worked, however, the final integrity check always failed. The reason for this was the sender was creating the integrity check using the payload, but the receiver was creating the integrity check using the payload and the padding, meaning that despite the data being the same, the integrity check was different. To solve this problem, I added a variable \inline{final\_padding} (see line 2 of figure \ref{fig:chal_resp}) that is an empty string unless it is the final chunk, in which case it is the padding added to the payload to fill the channel capacity. 
+
+The implementation of this is spread across the entire \inline{send\_covert\_packet} function and thus is difficult to show in a code snippet, but it can be seen in the source code (\url{/src/outbound/packets.jl}).

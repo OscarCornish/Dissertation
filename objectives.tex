@@ -1,4 +1,24 @@
 \chapter{Objectives}
 \label{ch:objectives}
 
-This paper seeks to propose and evaluate a framework for an adaptive covert communication system. The framework will build upon the works outlined in the \fullref{ch:related_work} chapter
+The terms \textit{\textbf{MUST}}, \textit{\textbf{SHOULD}} and \textit{\textbf{MAY}} are used to describe the importance of each objective, as defined in \cite{rfc2119}.
+This paper seeks to propose and evaluate a framework for an adaptive covert communication system, drawing on prior work in the field, outlined in \fullref{ch:background} and \fullref{ch:related_work}. The framework will be evaluated against the following objectives:
+
+\begin{enumerate}
+    \item \textit{\textbf{MUST}} be able to determine and switch to the best communication channel for the current situation.
+    \item \textit{\textbf{MUST}} be able to detect and recover from failures in communication.
+    \item \textit{\textbf{MUST}} be able to adapt to changes in the environment. 
+    \item \textit{\textbf{MUST}} Encrypt and decrypt messages using a shared secret key.
+    \item \textit{\textbf{SHOULD}} be able to recover from the complete failure of a communication channel.
+    \item \textit{\textbf{MAY}} Allow bidirectional communication.
+    \item \textit{\textbf{MAY}} Handle multiple channels at a time.
+\end{enumerate}
+
+We will also evaluate the framework against the following non-functional requirements:
+
+\begin{enumerate}
+    \item The effect on the covertness of the framework that comes as a result of its adaptive nature.
+    \item The applicability of the framework to real-world scenarios.
+    \item The capability to add new communication channels with reasonable simplicity.
+\end{enumerate}
+

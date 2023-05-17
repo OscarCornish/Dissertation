@@ -77,7 +77,7 @@ classDiagram
 		+payload
 	}
 	Layer *-- Header
-	class Header
+	class Header {abstract type}
 	Ethernet_header <|-- Header
 	ARP_header <|-- Header
 	class Ethernet_header{
@@ -86,5 +86,27 @@ classDiagram
 		+UInt16 protocol
 	}
 	class ARP_header { ... }
+```
+
+# Network structure
+
+```mermaid
+graph
+	subgraph bridge
+		br0 -.- sendb
+		br0 -.- auxb
+		br0 -.- recvb
+
+	end
+	subgraph sender
+		senda <---> sendb
+	end
+	subgraph receiver
+		recva <---> recvb
+	end
+	subgraph aux
+		auxa <---> auxb
+	end
+	
 ```
 

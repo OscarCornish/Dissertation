@@ -17,7 +17,7 @@ Digital steganography is a form of steganography that uses digital media as the 
 
 In a traditional image this is simply not possible, and highlights the effectiveness of using digital media as the cover text. This is not limited to images, it can be applied to any digital media, such as audio, video, and text. This is the focus of this paper, as the cover text will be the TCP/IP stack, and the stegotext will be hidden in the protocols of the stack.
 
-Another benefit to using digital steganography is the ability to use more complex encoding techniques, and permit asymmetrical encryption to create secure steganographic systems, Hughes (2000) \cite{SaW} defines this as "A system where an opponent who understands the system, but does not know the key, can obtain no evidence (or even grounds for suspicion) that a communication has taken place. ie: no information about the embedded text can be obtained from knowledge of the stego-system".
+Another benefit to using digital steganography is the ability to use more complex encoding techniques, and permit symmetrical encryption to create secure steganographic systems, Hughes (2000) \cite{SaW} defines this as "A system where an opponent who understands the system, but does not know the key, can obtain no evidence (or even grounds for suspicion) that a communication has taken place. ie: no information about the embedded text can be obtained from knowledge of the stego-system", it is for this reason that encrypted covert channels are harder to detect \cite{CCitTCPIPPS}.
 
 These secure systems are excellent when working in the TCP/IP stack, because of the nature of the protocols, often using random numbers to have "unique" identifiers, these unique fields can hold encrypted stegotext without raising suspicion, as the fields are expected to be random.
 
@@ -45,14 +45,14 @@ This process can be abused by spoofing the sending address of the client (as the
 
 \begin{figure}[!h]
     \centering
-    \includegraphics[width=0.8\textwidth]{fig/TCPACKNormal.png}
+    \includegraphics[width=0.6\textwidth]{fig/TCPACKNormal.png}
     \caption{Normal TCP three-way handshake}
     \label{fig:TCPACKNormal}
 \end{figure}
 
 \begin{figure}[!h]
     \centering
-    \includegraphics[width=0.8\textwidth]{fig/TCPACKCC.png}
+    \includegraphics[width=0.9\textwidth]{fig/TCPACKCC.png}
     \caption{TCP three-way handshake with covert channel}
     \label{fig:TCPACKCC}
 \end{figure}

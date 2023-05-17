@@ -1,0 +1,204 @@
+\chapter{Code snippets}
+
+\section{rebase\_pcap.jl}
+\label{sec:apdx_rebase_jl}
+
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+# Take pcap file, and the address range to rebase.
+# Args:
+#   1 - Pcap file : String
+#   2 - Address range to rebase : String
+#   3 - New address range : String
+#   4 - Excluded addresses : String (csv)
+
+# Example:
+#  rebase_pcap.jl test.pcap 192.168.0.0 10.0.0.0 10.20.30.1,10.20.30.2
+
+# !!! only does /24 ranges at the moment !!!
+
+struct IpAddr
+    octet1::UInt8
+    octet2::UInt8
+    octet3::UInt8
+    octet4::UInt8
+    IpAddr(s::String) = new(parse.(UInt8, split(s, "."))...)
+end
+
+addr(o::Vector{UInt8}) = join(string.(Int64.(o)), ".")
+
+function pcap_addr_stats(pcapf::String, range::Vector{UInt8})::Vector{UInt8} # Vector of endpoints
+    ref_dict = Dict{UInt8, Int64}()
+    # Read pcap as bytes
+    pcap = Vector{UInt8}()
+    open(pcapf, "r") do f
+        readbytes!(f, pcap, typemax(Int64))
+    end
+    println("Pcap length: $(length(pcap))")
+    # search for range in Pcap
+    for i in 1:length(pcap)-length(range)-1
+        if pcap[i:i+length(range)-1] == range
+            last_octet = pcap[i+length(range)]
+            if haskey(ref_dict, last_octet)
+                ref_dict[last_octet] += 1
+            else
+                ref_dict[last_octet] = 1
+            end
+        end
+    end
+    # Print stats
+    for (oct, count) ∈ ref_dict
+        println("Octet: $(addr(vcat(range, oct))), Count: $count")
+    end
+    return Vector{UInt8}([k for k ∈ keys(ref_dict)])
+end
+
+excluded_octects = parse.(UInt8, last.(split.(split(ARGS[4], ","), ".")))
+println("Excluded octets: $excluded_octects")
+
+pcapf = ARGS[1]
+from = IpAddr(ARGS[2])
+to = IpAddr(ARGS[3])
+from_range = [from.octet1, from.octet2, from.octet3]
+to_range = [to.octet1, to.octet2, to.octet3]
+
+println("\n")
+
+octs = pcap_addr_stats(pcapf, from_range)
+
+remap = Dict{UInt8, UInt8}()
+
+for o ∈ excluded_octects
+    while true
+        choice = rand(UInt8)
+        if choice ∉ octs && choice ∉ values(remap) && choice ∉ excluded_octects
+            remap[o] = choice
+            break
+        end
+    end
+end
+
+
+println("\n")
+
+function rebase(pcapf::String, fromrange::Vector{UInt8}, torange::Vector{UInt8}, remap::Dict{UInt8, UInt8})::NTuple{2, String}
+    # Read pcap as bytes
+    pcap = Vector{UInt8}()
+    open(pcapf, "r") do f
+        readbytes!(f, pcap, typemax(Int64))
+    end
+    range_length = length(fromrange)
+    # search for range in Pcap
+    for i in 1:length(pcap)-range_length-1
+        if pcap[i:i+range_length-1] == fromrange
+            last_octet = pcap[i+range_length]
+            if last_octet ∈ excluded_octects
+                pcap[i+range_length] = remap[last_octet]
+            end
+            pcap[i:i+range_length-1] = torange
+        end
+    end
+    # Write new pcap
+    name = join(vcat("rebased", split.(pcapf, ".")[2:end]), ".")
+    rebased_name = "Dirty/" * name
+    open(rebased_name, "w") do f
+        write(f, pcap)
+    end
+    pcap_addr_stats(rebased_name, torange)
+    return (rebased_name, "Rebased/"*name)
+end
+
+(broken_checksum, fixed) = rebase(pcapf, from_range, to_range, remap)
+
+run(Cmd(["python3", "fix_checksum.py", broken_checksum, fixed]))
+\end{lstlisting}
+
+\section{fix\_checksum.py}
+\label{sec:apdx_fix_checksum_py}
+
+\begin{listing}[H]
+    \vspace{0.5cm}
+    \begin{minted}{py}
+# Fix checksums in a pcap file
+# Arg 1: Input pcap
+# Arg 2: Output pcap
+
+import sys
+import scapy.all as scapy
+
+def null_checksum(packet):
+    for layer in (scapy.IP, scapy.TCP, scapy.UDP, scapy.ICMP):
+        if packet.haslayer(layer):
+            print(layer)
+            packet[layer].chksum = None
+    return packet
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        exit(-1)
+    _packets = scapy.rdpcap(sys.argv[1])
+    packets = map(null_checksum, _packets)
+    scapy.wrpcap(sys.argv[2], packets)
+    exit(0) 
+    \end{minted}
+\end{listing}
+
+\section{warden.py}
+\label{sec:warden_py}
+
+\begin{listing}[H]
+    \vspace{0.5cm}
+    \begin{minted}{py}
+import scapy.all as scapy
+import sys
+
+# Args 1 : pcap file
+
+def bitstring(d):
+    return "{0:b}".format(d)
+
+def tcp_ack_bounce_data(packet):
+    if not packet.haslayer(scapy.TCP):
+        return None
+    else:
+        return bitstring(packet[scapy.TCP].ack)
+
+def ip_identification(packet):
+    if not packet.haslayer(scapy.IP):
+        return None
+    else:
+        return bitstring(packet[scapy.IP].id)
+
+def get_hosts(packet):
+    if not packet.haslayer(scapy.IP):
+        return None
+    else:
+        return (packet[scapy.IP].src, packet[scapy.IP].dst)
+
+def linear(pcap_data):
+    channels = {}
+    for i, packet in enumerate(pcap_data):
+        x = get_hosts(packet)
+        if x:
+            src, _ = x
+            if src[:9] == "10.20.30.":
+                t, i = tcp_ack_bounce_data(packet), ip_identification(packet)
+                if (t and t[:4] == "1111") or (i and i[:4] == "1111"):
+                    if src in channels:
+                        channels[src].append(i)
+                    else:
+                        channels[src] = [i]
+    return channels
+
+def main():
+    packets = scapy.rdpcap(sys.argv[1])
+    channels = linear(packets)
+    s = 0
+    print(f"With {len(packets)} packets:")
+    for k, v in channels.items():
+        print(f" - Host ({k}): {len(v)} sentinels found")
+        s += len(v)
+    print(f"False positive rate: {round((1 - (2/s))*100, 2)}%")
+
+main()
+    \end{minted}
+\end{listing}
