@@ -18,10 +18,8 @@ jobs:
           root_file: document.tex
           args: -f -bibtex -lualatex -latexoption=-file-line-error -latexoption=-interaction=nonstopmode -latexoption=-shell-escape -latexoption=-synctex=1
 
-      - name: Create release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/upload-artifact@v3
         with:
-          files: document.pdf
-          token: ${{ github.TOKEN }}
+          name: dissertation.pdf
+          path: document.pdf
         
