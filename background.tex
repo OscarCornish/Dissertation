@@ -5,17 +5,17 @@
 
 Steganography is the practice of concealing information within other information.
 
-An example of where this is used is in the prisoner's problem, outlined by \cite{SIMMONS}, where two prisoners, Alice and Bob, are being held in separate cells. The prison warden, Walter, knows that Alice and Bob are likely to try and plot an escape, but Walter cannot prevent their communication until he has proof. Walter tells the prisoners that he will allow them to communicate, but all messages will first be read by him. Alice and Bob must communicate in a way that Walter cannot understand, without raising suspicion of the existence of a hidden message. This is where steganography comes in, Alice and Bob could use a technique such as the first letter of each line being combined to make a message (stegotext), to ensure that the message read by Walter (cover text) isn't suspicious.
+An example of where this is used is in the prisoner's problem, outlined by \cite{SIMMONS}, where two prisoners, Alice and Bob, are being held in separate cells. The prison warden, Walter, knows that Alice and Bob are likely to try and plot an escape, but Walter cannot prevent their communication until he has proof. Walter tells the prisoners that he will allow them to communicate, but all messages will first be read by him. Alice and Bob must communicate in a way that Walter cannot understand, without raising suspicion of the existence of a hidden message. This is where steganography comes in, Alice and Bob could use a technique to make a "hidden" message, such as the first letter of each line being combined to make a message (stegotext), to ensure that the message read by Walter (cover text) is worded in a way that isn't suspicious.
 
-Two types of Warden exist, a passive warden and an active warden. The passive warden will not alter the content of the message but will attempt to detect and prevent hidden communication in a message, whereas an active warden will alter the message in an attempt to spoil any unknown hidden communications, in the prison example Walter could reword the message so the meaning remains, but the implicit message is lost \citep{aSoCaSaAWA}.
+Two types of Warden exist, a passive warden and an active warden. The passive warden will not alter the content of the message but will attempt to detect and prevent hidden communication in a message, whereas an active warden will alter the message in an attempt to spoil any unknown hidden communications. In the prison example, if Walter was an active warden he might reword the message so the meaning remains, but the implicit message is lost \citep{aSoCaSaAWA}.
 
-A good example of an active warden comes from a tale from World War I, where a cablegram was placed on a censors desk reading "Father is dead", the censor was suspicious and thus rewrote it to say "Father is deceased", shortly after a response was received saying "Is Father dead or deceased?" \citep{TCTSoSW}. This shows the clear benefits of using an active warden, however, it does come at a cost, the warden must take the time to analyse the message and alter it, which is costly in real-time communication systems.
+A good example of an active warden comes from a tale from World War I, where a cablegram was placed on a censors desk reading "Father is dead", the censor was suspicious and thus rewrote it to say "Father is deceased", shortly after a response was received saying "Is Father dead or deceased?" \citep{TCTSoSW} illustrating that the receiver was no longer certain of the implicit message that had attempted to be communicated. This shows the clear benefits of using an active warden, however, it does come at a cost, the warden must take the time to analyse the message and alter it, which is costly in real-time communication systems.
 
 \section{Digital Steganography}
 
-Digital steganography is a form of steganography that uses digital media as the cover text, the benefit of this is the nature of digital media. This opens up many possibilities in terms of the cover text, for example, a digital image can be used as the cover text, and the stegotext can be hidden in the least significant bits of the image. This is known as Least Significant Bit (LSB) steganography, and is a popular method of digital steganography \citep{AESTfHD}.
+Digital steganography is a form of steganography that uses digital media as the cover text. The nature of digital media opens up many possibilities for cover texts, for example, a digital image can be used as the cover text, and the stegotext can be hidden in the least significant bits of the image. This is known as Least Significant Bit (LSB) steganography, and is a popular method of digital steganography \citep{AESTfHD}.
 
-In a traditional image this is simply not possible, and highlights the effectiveness of using digital media as the cover text. This is not limited to images, it can be applied to any digital media, such as audio, video, and text. This is the focus of this paper, as the cover text will be the TCP/IP stack, and the stegotext will be hidden in the protocols of the stack.
+In a traditional image, this is simply not possible which highlights the effectiveness of using digital media as the cover text. This is not limited to images, it can be applied to any digital media, such as audio, video, and text. This is the focus of this paper, as the cover text will be the TCP/IP stack, and the stegotext will be hidden in the protocols of the stack.
 
 Another benefit to using digital steganography is the ability to use more complex encoding techniques and permit symmetrical encryption to create secure steganographic systems. \cite{SaW} defines this as "A system where an opponent who understands the system, but does not know the key, can obtain no evidence (or even grounds for suspicion) that a communication has taken place. ie: no information about the embedded text can be obtained from knowledge of the stego-system", it is for this reason that encrypted covert channels are harder to detect \citep{CCitTCPIPPS}.
 
@@ -29,13 +29,19 @@ The protocols have various fields that hold information about a packet and its c
 
 In this paper, I will implement three existing "static" covert channels:
 
+\begin{itemize}
+    \item IP Identification Field
+    \item TCP Acknowledgement Field
+    \item ARP Beaconing
+\end{itemize}
+
 \subsection{IP Identification Field}
 
-The IP Identification stores "An identifying value assigned by the sender to aid in assembling the fragments of a datagram" \citep{rfc791}, since this value is unique, it is essentially random, and this can be used to embed bits \citep{EoIICCA}, making it a good candidate for our secure steganographic system.
+The IP Identification stores "An identifying value assigned by the sender to aid in assembling the fragments of a datagram [(A unit of data transfer)]" \citep{rfc791}, since this value is unique, an adversary cannot determine its validity, and this can be used to embed bits \citep{EoIICCA}, making it a good candidate for our secure steganographic system.
 
 Another benefit is the volume of IPv4 traffic on the internet, as of 2022, 30-40\% of end-user traffic is IPv6 \citep{I10YO} which means that the majority of traffic is IPv4. This high frequency of traffic in combination with sixteen encodable bits of the identification field allows for a high bandwidth channel, while still maintaining a high quality of covertness.
 
-The short-comings of this channel are outlined in \cite{rfc6864}, where it states "the [identification] field's value is [to be] defined only when fragmentation occurs", this means an active warden could set the identification field to a constant value, thus preventing the use of this channel. This could be avoided by fragmenting the packets, however, fragmented packets are less common and thus would raise suspicion. This is not a concern when dealing with passive wardens, as they will not alter the packets.
+The short-comings of this channel are outlined by \cite{rfc6864}, where they state "the [identification] field's value is [to be] defined only when fragmentation occurs", this means an active warden could set the identification field to a constant value, thus preventing the use of this channel. This could be avoided by fragmenting the packets, however, fragmented packets are less common and thus would raise suspicion. This is not a concern when dealing with passive wardens, as they will not alter the packets.
 
 \subsection{TCP Acknowledgement Field}
 
@@ -62,7 +68,7 @@ By spoofing the address to the recipient, an observing warden will only see comm
 
 In addition to this, the TCP protocol is used in a large proportion of internet traffic, and its thirty-two-bit capacity gives this channel a very high bandwidth.
 
-The ISN generator is bound to "a (possibly fictitious) 32-bit clock that increments roughly every 4 microseconds" \citep{Trfc793}, since the clock is a client-side clock, it is essentially random to an observer, for the first communication. However, a warden could track the allocation of ISNs and determine that a covert channel is likely.
+The ISN generator is bound to "a (possibly fictitious) 32-bit clock that increments roughly every 4 microseconds" \citep{Trfc793}, since the clock is a client-side clock, it is essentially random (and thus its validity is unverifiable) to an observer, for the first communication. However, a warden could track the allocation of ISNs and determine that a covert channel is likely.
 
 This channel also leaves a trail of failed / incomplete handshakes, as a consequence of not performing the actual handshake. This can raise flags in wardens that are monitoring the network, and thus make the channel less covert. As a further note, this channel is only possible when the spoofed address is in the same subnet as the recipient, otherwise, the packet will be dropped leaving the network. 
 

@@ -3,7 +3,7 @@
 \section{Implementation of covert modules}
 \label{sec:impl_cov_mod}
 
-The following is an extract from the source code of the framework (\url{/src/covert_channels/covert_channels.jl}) that shows the implementation of a covert module.
+The following is an extract from the source code of the framework (\url{FaucetEnv/Faucet/src/covert_channels/covert_channels.jl}) that shows the implementation of a covert module.
 
 \begin{lstlisting}[language=JuliaLocal, style=julia]
 ipv4_identifaction::covert_method{:IPv4_Identification} = covert_method(
@@ -66,7 +66,7 @@ This struct instantiation implicitly converts the name of the covert channel to 
 
 The input variables and output of the implementation can be found in \fullref{sec:decision_algorithm}. This section will cover the entire algorithm, getting from the input variables to the output.
 
-This function is written in Julia, making use of its ability to use Unicode characters in variable names, allowing me to use the same mathematical notation in the code as in the design documentation. The following is an extract from the source code of the framework (\url{/src/covert_channels/covert_channels.jl})
+This function is written in Julia, making use of its ability to use Unicode characters in variable names, allowing me to use the same mathematical notation in the code as in the design documentation. The following is an extract from the source code of the framework (\url{FaucetEnv/Facuet/src/covert_channels/covert_channels.jl})
 
 \begin{lstlisting}[language=JuliaLocal, style=julia]
 function method_calculations(covert_methods::Vector{covert_method}, env::Dict{Symbol, Any}, Eₚ::Vector{Int64}=[], current_method::Int64=0)::NTuple{2, Vector{Float64}}
@@ -158,7 +158,7 @@ The \inline{method\_calculations} function only does the calculations, not the s
 \section{Integrity check}
 \label{sec:integrity_impl}
 
-The integrity check process has two main parts, the sender, and the receiver. For both of the processes, the integrity is calculated using the same function (\url{/src/utils.jl}):
+The integrity check process has two main parts, the sender, and the receiver. For both of the processes, the integrity is calculated using the same function (\url{FaucetEnv/Facuet/src/utils.jl}):
 
 \begin{figure}[h]
 \begin{lstlisting}[language=JuliaLocal, style=julia]
@@ -176,7 +176,7 @@ This function uses a CRC8 checksum, but in reality, its implementation is not im
 
 To prevent inconsistencies in the check, the same function is used by both the sender and receiver, by putting the function in the shared \inline{utils.jl} file.
 
-The sender needs to issue the challenge and receive the response. The challenge piggybacks the method change protocol, so it just needs to await the response from the receiver. It does this by opening a raw socket and listening for an arp packet from the target to the known host it used to create the offset. We can see the challenge and response process in the \inline{send\_covert\_payload} function (found in \url{/src/outbound/packets.jl}) in figure \ref{fig:chal_resp}.
+The sender needs to issue the challenge and receive the response. The challenge piggybacks the method change protocol, so it just needs to await the response from the receiver. It does this by opening a raw socket and listening for an arp packet from the target to the known host it used to create the offset. We can see the challenge and response process in the \inline{send\_covert\_payload} function (found in \url{FaucetEnv/Facuet/src/outbound/packets.jl}) in figure \ref{fig:chal_resp}.
 
 \begin{figure}[h]
 \begin{lstlisting}[language=JuliaLocal, style=julia]
@@ -245,5 +245,57 @@ An oversight of the integrity process outlined in the \fullref{sec:integrity} se
 
 This worked, however, the final integrity check always failed. The reason for this was the sender was creating the integrity check using the payload, but the receiver was creating the integrity check using the payload and the padding, meaning that despite the data being the same, the integrity check was different. To solve this problem, I added a variable \inline{final\_padding} (see line 2 of figure \ref{fig:chal_resp}) that is an empty string unless it is the final chunk, in which case it is the padding added to the payload to fill the channel capacity. 
 
-The implementation of this is spread across the entire \inline{send\_covert\_packet} function and thus is difficult to show in a code snippet, but it can be seen in the source code (\url{/src/outbound/packets.jl}).
+The implementation of this is spread across the entire \inline{send\_covert\_packet} function and thus is difficult to show in a code snippet, but it can be seen in the source code (\url{FaucetEnv/Facuet/src/outbound/packets.jl}).
+
+\section{Getting a valid TCP server}
+
+For the TCP Acknowledgement bounce channel I wanted to use a locally accessible TCP server to showcase how the framework allows adaption to the environment at a channel level, As discussed in \fullref{sec:covert_modules}. Unfortunately, because my test environment is a packet capture replay, the server found by the framework cannot be communicated with (as there is no host to communicate with). To solve this problem, I hardcoded the response to point at a valid server, this is not ideal, but it is a workaround for this project. We can still see the server that the framework finds in the packet capture.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\textwidth]{fig/GET_TCP_debug.png}
+    \caption{The TCP server found by the framework}
+    \label{fig:tcp_server}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\textwidth]{fig/GET_TCP_pcap.png}
+    \caption{The TCP server found by the framework in the packet capture}
+    \label{fig:tcp_server_pcap}
+\end{figure}
+
+The \inline{get\_tcp\_server} function works by looking at the TCP traffic in the environment, It favours traffic that is going to, or from, a TCP service like HTTP (Port 80) or HTTPS (Port 443). If it cannot find any of those it will simply look for a TCP packet with the SYN Flag set, which indicated a server, and then return it.
+
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+function get_tcp_server(q::Vector{Packet})::Union{Tuple{NTuple{6, UInt8}, UInt32, UInt16}, NTuple{3, Nothing}}
+    common_query = Vector{Dict{String, Dict{Symbol, Any}}}([
+        Dict{String, Dict{Symbol, Any}}(
+            "TCP_header" => Dict{Symbol, Any}(
+                :dport => TCP_SERVICES
+            )
+        )
+    ])
+    # Clients connected to common TCP Services, TCP traffic to them is favourable (In terms of covertness)
+    services = query_queue(q, common_query)
+    
+    ...
+
+    service_mac, service_ip, service_port = nothing, nothing, nothing
+    if !isempty(services)
+        # Take the most recently active one
+        service = pop!(services)
+        # This is a packet going toward tcp service
+        service_mac = getfield(service[layer2index["Ethernet_header"]], :source)
+        # Ethernet_header -> tcp server mac (of next hop from local perspective)
+        service_ip = getfield(service[layer2index["IPv4_header"]], :daddr)
+        # IP_header.daddr -> tcp server ip
+        service_port = getfield(service[layer2index["TCP_header"]], :dport)
+        # TCP_header.dport -> tcp server port
+    else
+    ...
+    return (mac, ip, port)
+end
+get_tcp_server(q::CircularChannel{Packet})::Union{Tuple{NTuple{6, UInt8}, UInt32, UInt16}, NTuple{3, Nothing}} = get_tcp_server(get_queue_data(q))
+\end{lstlisting}
 

@@ -1,15 +1,15 @@
-\chapter{Testing & Evaluation}
+\chapter{Testing \& Evaluation}
 
-This chapter tests and evaluates the produced framework against the objectives and non-functional requirements outlined in \fullref{ch:objectives} using the environment outlined in \ref{sec:testing_environment}.
+This chapter tests and evaluates the produced framework against the objectives and non-functional requirements outlined in \fullref{ch:objectives} using the environment outlined in \fullref{sec:testing_environment}.
 
 \section{Recovering from a communication channel failure}
-\label{sec:detecting_and_recovering_from_failures}
+\label{sec:failure_recovery}
 
 Communication failure can be caused by a variety of factors, but the most important to the covert system is communication prevention by an adversary, especially in applications like censorship resistance.
 
-In order to mimic an adversary I wrote a script that acts like an active warden (see \fullref{sec:warden_py} for implementation details), this script can block either one of the channels, or both. The script works by hooking into IPTables using a NetFilter queue, where it can drop and alter packets with the assistance of scapy \citep{scapy}. The script is rudimentary in its current state, as I do not have actual traffic to worry about disrupting, I can nullify header fields at my discretion. While the script sets the acknowledgement number to 0, in real-world application it would map these values similar to Network Address Translation.
+In order to mimic an adversary I wrote a script that acts like an active warden (see \fullref{sec:filter_py} for implementation details), this script can block either one of the channels, or both. The script works by hooking into IPTables using a NetFilter queue, where it can drop and alter packets with the assistance of scapy \citep{scapy}. The script is rudimentary in its current state, as I do not have actual traffic to worry about disrupting, I can nullify header fields at my discretion. While the script sets the acknowledgement number to 0, in real-world application it would map these values similar to Network Address Translation.
 
-The clearest way to show this in action is to look at the script output during this process, to mimic this scenario I created the \url{FaucetEnv/Commblock} script, which calls the warden script (appendix \ref{sec:warden_py}).
+The clearest way to show this in action is to look at the script output during this process, to mimic this scenario I created the \url{FaucetEnv/Commblock} script, which calls the warden script (appendix \ref{sec:filter_py}).
 
 \begin{figure}[H]
     \centering
@@ -57,7 +57,7 @@ This example shows that the framework can successfully recover from a communicat
 \section{Transmission padding}
 \label{sec:padding_testing}
 
-The types of padding, outlined in \ref{sec:transmission_padding}, are tested in this section.
+The types of padding, outlined in \fullref{sec:transmission_padding}, are tested in this section.
 
 The padding that works with a 1 followed by 0's for the remaining space will be referred to as "short" padding, and the padding proposed will be referred to as "covert" padding.
 
@@ -135,6 +135,7 @@ Extracting the IP Identification field from the captures of 256 communications, 
 I am unsure what exactly causes the distributions to look like this, but I suspect it is something related to micro protocols, the sparse nature of the points at the top of the graph is likely an artefact of the first bit that denotes data (0 for data, 1 for meta protocol), since our communication is more data than meta protocol, this is to be expected. However, neither of these distributions matches the overt data (figure \ref{fig:overt_field}), which is undesirable. This could open the framework up to detection methods that look for these patterns, however, as I am unaware of the cause of these patterns, I am unsure how to detect them.
 
 \section{Testing channel selection and adaption}
+\label{sec:channel_selection_and_adaption}
 
 The framework can effectively select the best channel for the current situation. It will attempt to choose the channel with the highest bandwidth, while still factoring in covertness. Unfortunately showing this in a figure is difficult. The first channel is always chosen to do the sentinel, but it is not always the best suited, in a TCP-biased environment (like the one seen in figure \ref{fig:env_composition}) the IP Identification is not out of place, but it does have half capacity of the TCP Acknowledgement bounce, so it will immediately switch (see figures \ref{fig:send_switch} \& \ref{fig:recv_switch}).
 
@@ -160,15 +161,24 @@ The framework can effectively select the best channel for the current situation.
 \end{figure}
 
 \section{Testing detection and recovery from failures}
+\label{sec:soft_failure_recovery}
 
-The framework can detect failures in communication using the integrity challenge, under normal circumstances the integrity of the payload will not be compromised, however, by running the warden script (see \fullref{sec:warden_py}) we can compromise a section of communication, and see the framework recover from it.
+The framework can detect failures in communication using the integrity challenge, under normal circumstances the integrity of the payload will not be compromised, however, by running the warden script (see \fullref{sec:filter_py}) we can compromise a section of communication, and see the framework recover from it.
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=0.7\textwidth]{fig/poison_tcp.png.png}
+    \includegraphics[width=0.7\textwidth]{fig/poison_tcp.png}
     \caption{A compromised payload}
     \label{fig:poison_tcp}
 \end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\textwidth]{fig/discard_posioned_chunk.png}
+    \caption{The discarding of the compromised chunk}
+    \label{fig:discard_poison}
+\end{figure}
+
 
 \begin{figure}
     \centering
@@ -191,13 +201,13 @@ The framework successfully meets all of the \textit{\textbf{MUST}} requirements 
 \begin{itemize}
     \item The framework can determine the best communication channel for the current situation, as shown in \fullref{sec:channel_selection_and_adaption}.
     \item The framework can adapt to its environment, as shown in \fullref{sec:channel_selection_and_adaption}.
-    \item The framework can detect and recover from failures in communication, as shown in \fullref{sec:detecting_and_recovering_from_failures}.
+    \item The framework can detect and recover from failures in communication, as shown in \fullref{sec:soft_failure_recovery}.
     \item The framework uses encrypted communication, with a pre-shared key, as outlined in \fullref{sec:target}.
 \end{itemize}
 
 The framework also meets the \textit{\textbf{SHOULD}} requirement:
 
-"The framework can recover from the complete failure of a communication channel", as shown in \fullref{sec:recovering_from_a_communication_channel_failure}.
+"The framework can recover from the complete failure of a communication channel", as shown in \fullref{sec:failure_recovery}.
 
 However the requirement:
 
@@ -250,6 +260,7 @@ Another issue is the size of the framework, because of julias (current) lack of 
 
 
 \subsection{Capability to add new communication channels}
+\label{sec:new_channels}
 
 Adding new channels to the framework is relatively simple, especially for channels that use already-supported protocols (such as IP or TCP), adding new protocols does however require additional work, as the receiver and sender will require a way to represent the protocol as a \inline{Packet} (see \fullref{sec:packet_processing}), and a way to create the packet from a dictionary (see \fullref{sec:sending_packets}) respectively.
 

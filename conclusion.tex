@@ -1,2 +1,35 @@
-\chapter{Conclusion}
+\chapter{Conclusions}
+\section{Conclusion}
 
+This project and the research related to it is a success. All of the \textbf{\textit{MUST}} requirements have been met, and the \textbf{\textit{SHOULD}} requirements have been met to a satisfactory level (although not quite perfect implementations). The remaining \textbf{\textit{MAY}} requirements are not met, largely because they required more time than I thought was reasonable to spend on them.
+
+The framework was a complicated system to design and implement, and having encountered many problems on the way in addition to the wide scope of the project, I did not get to test the implementation to the extent I would have liked. Given extra time, I would want to test the environment in a wider range of environments, and with a wider range of protocols, and also test the framework against current warden solutions.
+
+In hindsight, bidirectional communication would probably have proved to have been a useful feature, not only to increase the framework's use cases, but it would allow more robust error-checking mechanisms to be implemented.
+
+Overall, I think my work has successfully shown that an adaptive covert communication framework is not only possible, but beneficial to the integrity, and availability of communication. The proposal of better micro protocols and a more covert padding implementation are also important contributions to the field.
+
+\section{Future work}
+
+Before the framework is used in a real-world scenario for covert communication, there is plenty of future work to extend the framework and improve its performance:
+
+\begin{itemize}
+    \item No attempt at having a valid cover text:
+    \begin{itemize}
+        \item The scope of this paper was the protocols involved in communication, however, the payload data is incredibly important to the application of the framework in the real world. The covertness of the communication is only as strong as the weakest link, in this case, it is the overt traffic.
+    \end{itemize}
+    \item The current channel algorithm is na\"ive:
+    \begin{itemize}
+        \item The algorithm only observes the number of possible cover texts, however, the nature of that traffic is equally important, If the majority of traffic is HTTPS but it all goes to a local proxy then HTTPS traffic to a different destination is suspicious.
+        \item This is not to say that the proposed algorithm is poor, it is still effective at evaluating protocols based on the environment.
+    \end{itemize}
+    \item Managing the quality of channels:
+    \begin{itemize}
+        \item The framework takes a "dumb" approach to managing channels, if it fails twice in a row it will be blacklisted for some time. This does not manage well with intermittently available channels, these intermittent channels cause the framework to keep resending messages, which is not ideal.
+        \item A smarter approach to this should factor in the history of a channel's quality, and penalise it appropriately for intermittent failures.
+    \end{itemize}
+\end{itemize}
+
+\section{Ethical considerations}
+
+Whilst covert communication systems do have illicit uses, like espionage, In order for entities to be protected from these systems, they must be understood. This project is a step towards understanding these systems, and thus protecting against them.

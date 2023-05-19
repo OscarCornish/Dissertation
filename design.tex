@@ -1,11 +1,20 @@
 \chapter{Design}
 \label{ch:design}
 
+\section{The Julia language}
+
+I chose to write the project in Julia \citep{julia}, A dynamically typed, Just-In-Time compiled language, This allows it to have both the speed of a compiled language and the flexibility of an interpreted one. This made it an excellent choice for my framework as I could quickly iterate on the design, without compromising on the performance of computationally expensive operations like querying the queue (see \fullref{sec:queue}).
+
+Julia also has excellent integrations with the C language, which allowed me to use the libpcap library \citep{libpcap} inside of a Julia program, this can be seen in action with the use of \inline{ccall} in figure \ref{fig:raw_sock}.
+
+The high-level, dynamic nature of Julia also lends itself to the ease of extending the framework with new covert channels, the intricacies of this process are discussed in \fullref{sec:new_channels}.
+
 \section{Packet capture}
 \label{sec:packet_capture}
 
 For the framework to adapt to the network environment, it must be able to listen to the network traffic.
 I concluded that one of two options would be best suited to my needs:
+
 \begin{itemize}
     \item libpcap
     \item A raw socket
@@ -38,7 +47,7 @@ packet = read(socket)
 \caption{Raw socket listener implementation}
 \label{fig:raw_sock}
 \end{figure}
-Julia will read the socket pipe until an EOF is found, which marks the end of a packet; this lightweight and simplistic implementation means the construction of this listener is incredibly cheap, and thus it is very versatile.
+Julia will read the socket pipe until an EOF is found, which marks the end of a packet; this lightweight and simplistic implementation means the construction of this listener has little cost to system resources, and thus it can be easily applied to a variety of use cases.
 
 \subsection{libpcap}
 
@@ -47,7 +56,7 @@ There are several benefits to using libpcap, the first being the ease of impleme
 
 Because of Julia's ability to integrate seamlessly with C and its libraries, the callback function could be written in Julia, removing the need to write any C code. The benefit of using a library is that it is appropriately optimised. libpcap creates a memory-mapped ring buffer for asynchronous packet reception \citep{packet_7}, this allows the user space to read the packet data without the need for system calls, and the shared buffer also reduces the number of copies required.
 
-While the platform-independent nature of libpcap is beneficial, the scope of this project is limited to Linux, and thus this will not be included in my evaluation.
+While the platform-independent nature of libpcap is beneficial, the scope of this project is limited to Linux to manage the scope, and thus this will not be considered as part of my evaluation.
 
 \subsection{Conclusion}
 
@@ -79,14 +88,14 @@ end
 To assist this process there is a tree defined that maps the protocol number to the header type, and the protocols in the layer above it. This makes the addition of protocols easy for the user, it is mostly just copying the structure of the protocol from the relevant header file, adding it to the tree, and two simple helper functions that just access fields.
 
 
-\section{The Queue}
+\section{The Packet Queue}
 \label{sec:queue}
 
-The queue is essential to the operation of the framework, it is how the packets are put by the listening thread, and retrieved by the main thread for processing.
+The queue is essential to the operation of the framework, it is how packets that are captured by the listening thread, are retrieved by the main thread for processing.
 
 Initially, I was using a \inline{Channel} data structure, it is a thread-safe, waitable, First-in-First-out queue \citep{julia} that worked for the most part. However, it introduced a bug into my codebase which meant the listening thread would block the main thread while it was waiting for packets, thus the covert channel would not run in a silent environment.
 
-While this isn't a huge problem, since a covert channel is quite exposed on a silent network, it is not ideal. I eventually deduced that I was improperly accessing the properties of the structure, I was attempting to get the whole queue without removing the items, so I just took it from the underlying array. Unfortunately, the \inline{Channel} is locked by default, and thus the main thread was blocked until the listening thread pushed something to the queue.
+While this wasn't a huge problem, since a covert channel is quite exposed on a silent network, it is not ideal. I eventually deduced that I was improperly accessing the properties of the structure, I was attempting to get the whole queue without removing the items, so I just took it from the underlying array. Unfortunately, the \inline{Channel} is locked by default, and thus the main thread was blocked until the listening thread pushed something to the queue.
 
 While I knew this action was not properly thread-safe, meaning I would likely be operating with stale data, it wasn't of great importance that my queue was truly up-to-date, as I was taking a rolling average of 150 packets anyway. I didn't realise that it would cause the main thread to be intermittently blocked, additionally, this unusual behaviour meant that it was difficult to debug, especially since my print statements were reliant on packets being received by the listening thread, which caused a lot of debugging cycles to be performed.
 
@@ -119,11 +128,12 @@ put!(queue, packet)
 \end{figure}
 \label{lst:queue_comparison}
 
-By overloading the \inline{put!} and \inline{take!} functions, I was able to implement their functionality for my new data structure, this meant for most of the code all I had to do was replace the type annotations of \inline{Channel} with \inline{CircularChannel}. This is of course except for the packet listener (queue producer), whose changes can be seen in the comparison above (figure \ref{lst:queue_comparison}), and the \inline{get\_queue\_data} function that I used to improperly access the queue, thanks to my use of a central function for accessing this queue data I was able to change the implementation of the function without having to change the code that called it. I did this by creating a type convert function for the \inline{CircularChannel\{T\}} to \inline{Vector\{T\}}, where T is any data type, since I implemented this in a thread-safe way, I was able to use altered \inline{get\_queue\_data} function to access the queue data without blocking the main thread.
+By implementing the \inline{put!} and \inline{take!} functions for my new data structure, I was able to avoid changing the majority of my existing implementation, needing only to replace the type from \inline{Channel} to \inline{CircularChannel}. I also simplified the code for the producer (packet listener) as seen in the comparison above (figure \ref{lst:queue_comparison}). The \inline{get\_queue\_data} function that I was previously using to illegally access the properties of the channel was called everywhere I needed to access the whole queue, so I only had to alter that function to access the \inline{CircularChannel} in a thread-safe manner. 
 
 I efficiently achieved this waiting using \inline{Conditions}, which are locks that implement \inline{wait} and \inline{notify} methods that block (reducing resource usage) and release threads, respectively, based on the status of the condition. This allows my main thread to wait for the listening thread to push a packet to the queue, and then continue processing the packet (for the receiver only).
 
 \subsection{Queriability}
+\label{sec:queriability}
 
 One of my goals for the project was to allow any type of covert channel to be used in the framework, regardless of classification. Ultimately, this meant I was going to have to take a dynamic approach to initialising and using channels. I concluded that it was best to be able to query the channel for certain properties in packets, like the destination port or the packet size.
 
@@ -139,7 +149,7 @@ I implemented a rudimentary query system, that allowed for querying of propertie
 \section{The arrangement}
 \label{sec:target}
 
-Covert communication is reliant on a preshared arrangement \citep{DoCCaS}, this arrangement is a set of parameters that both parties will assume the other is using hereon called the "target", it contains the following information:
+Covert communication is reliant on a preshared arrangement \citep{DoCCaS}, this arrangement is a set of parameters that both parties will assume the other is using, hereon called the "target", it contains the following information:
 
 \begin{itemize}
     \item The IP Address of the target.
@@ -160,7 +170,7 @@ For example, in an IP header, source and destination fields will default to the 
  
 Since the filling of these additional fields is done at execution time, a "skeleton" packet can be created that outlines a basic packet, then this skeleton can be used multiple times without having random fields being static, it is also useful with packet checksums, as this burden is not passed to the user. I make use of this functionality in the use of covert modules, as outlined in \fullref{sec:covert_modules}.
 
-The packets themselves are sent over a raw socket, this allows for the packet to be sent without the kernel imposing checks on its validity (such as the checksum), this is important for the operation of some covert channels, as they create packets that would otherwise be dropped by the kernel (sometimes because of firewalls). For a packet to be sent over a raw socket at the link layer (ethernet) it needs to be sent with a \inline{sockaddr\_ll} struct, outlined in \cite{packet_7} the majority of these fields are not required, or are unlikely to change (The physical layer protocol) and thus can be hardcoded, only two fields need to be created populated dynamically, the interface index and the destination mac address. The interface used is the one that the queue listens on, and the destination MAC can be taken from the packet.
+The packets themselves are sent over a raw socket, this allows for the packet to be sent without the kernel imposing checks on its validity (such as the checksum), this is important for the operation of some covert channels, as they create packets that would otherwise be dropped by the kernel (sometimes because of firewalls). For a packet to be sent over a raw socket at the link layer (ethernet) it needs to be sent with a \inline{sockaddr\_ll} struct, outlined in \cite{packet_7} the majority of these fields are not required, or are unlikely to change (The physical layer protocol) and thus can be hardcoded, only two fields need to be populated dynamically, the interface index and the destination mac address. The interface used is the one that the queue listens on, and the destination MAC can be taken from the packet.
 
 The packets can then be sent to the raw socket using the \inline{sendto} function, taking the socket, packet and \inline{sockaddr\_ll} as arguments.
 
@@ -177,7 +187,7 @@ Many of the sender's functions are reliant on the context of the environment, th
     \item The queue
 \end{itemize}
 
-I will discuss the desired secrecy argument in \fullref{sec:decision_algorithm}, and the interface has already been discussed in the construction of the \inline{sockaddr\_ll} struct (see \fullref{sec:sending_packets}). The socket is simply a raw socket, it does not carry context and thus could be recreated at each use, but that requires calls to the kernel, and this approach has very little overhead.
+I will discuss the desired secrecy argument in \fullref{sec:decision_algorithm}, and the interface has already been discussed in the construction of the \inline{sockaddr\_ll} struct (see \fullref{sec:sending_packets}). The socket is simply a raw socket, it does not carry context and thus could be recreated at each use, but that requires calls to the kernel, and this approach has very little technical overhead.
 
 The information about the target essentially outlines the default path to follow for a target, like the physical address of the target, or the gateway to use to reach the target. while this does not apply to all channels, it is used for many of them, and not worth recalculation for each packet.
 
@@ -192,11 +202,11 @@ Covert modules are implemented using:
 \begin{itemize}
     \item An \inline{init} function.
     \item An \inline{encode} function.
-    \item An \inline{decode} function.
-    \item A \inline{covert\_method} struct instance.
+    \item A \inline{decode} function.
+    \item An instance of the \inline{covert\_method} struct.
 \end{itemize}
 
-The \inline{init} method is called when the module is loaded, it is used to initialise the channel, and it returns a set of keyword arguments that are to be passed to the \inline{encode} functions. The most common of these arguments will be \inline{template}, which outlines the skeleton and structure of a packet that the covert channel lives in, omitting the fields that are to be used in the channel, as outlined in \fullref{sec:sending_packets}. This function is passed the queue (see \nameref{sec:queue}) to allow it to adapt to the environment.
+The \inline{init} method is called when the module is loaded, it is used to initialise the channel, and it returns a set of keyword arguments that are to be passed to the \inline{encode} functions. The most common of these arguments will be \inline{template}, which outlines the skeleton and structure of a packet that the covert channel lives in, omitting the fields that are to be used in the channel, as outlined in \fullref{sec:sending_packets}. This function is passed the queue (see \nameref{sec:queue}) as an argument, allowing it to adapt to the environment.
 
 Covert channels can be adapted to the network on a sub-method level to improve covertness, a good example of this is using IPv4 vs IPv6 as the internet protocol, for covert channels that exist in all other layers this does not affect their operation, but does allow them to be better suited to the network. I specifically chose to implement the TCP Acknowledgement bounce covert channel to showcase this flexibility in the framework. By using a local TCP server to bounce the packets, the channel must be aware of the network to discover these hosts. For this to be possible, the \inline{init} function must have the environment exposed to it, this is done by passing the environment dictionary outlined in \fullref{sec:context} to the \inline{init} function.
 
@@ -232,7 +242,7 @@ Covert modules need to be validated before they can be used in the framework, th
     \item The channels are in the same order they appear in the arrangement.
 \end{itemize}
 
-The first check prevents very small channels from being used in the framework, as they are not large enough to carry the \fullref{sec:microprotocols}. The second check prevents too many channels from being used, as the micro protocols need to be able to uniquely identify each one, and if there are too many channels then they cannot be used (but since they have been registered they can still be considered when picking an algorithm, causing a failure in the communication).
+The first check prevents very small channels from being used in the framework, as they are not large enough to carry the \fullref{sec:microprotocols}. The second check prevents too many channels from being used, this is because the channels are referenced by their index in the \inline{covert\_methods} array, and the micro protocols are limited by size on how many indexes they can represent.
 
 Since the channels are referenced by their index, both the sender and receiver need to be using the same channels, in the same order, this is why the third check is required.
 
@@ -332,10 +342,9 @@ Data is sent in chunks, a chunk is effectively a buffer of data that has not had
 
 In order to implement these protocols effectively, using the contextual design proposed in \citep{rfc1144}, packets need to describe their nature, I decided to implement this using a single bit, at the start of the payload. 0 or 1 indicate whether the packet is data or metadata, respectively. Protocols are implemented as metadata and are of adaptive length, the size of these protocols is a function of the number of underlying channels that may be used. The minimum channel size is $1 + \lfloor log_2{M_c + 1} \rfloor$ where $M_c$ is the number of underlying covert methods.
 
-For some protocols, it is beneficial to use more than the minimum channel size, for example, when verifying the integrity of a channel an offset can follow the protocol. The offset is assumed to be 0 if it is not present, but when it is present it improves the covertness of the channel, exactly why this is the case is discussed in \fullref{sec:integrity}. For the chunk discarding protocol, the space following the protocol is filled with payload data, this is because the sender will have to resend the previous data segments and without doing this there would be repeated fields, which would be suspicious to an observer.
+For some protocols, it is beneficial to use more than the minimum channel size, for example, when verifying the integrity of a channel an offset can follow the protocol. The offset is assumed to be 0 if it is not present, but when it is present it improves the covertness of the channel, exactly why this is the case is discussed in \fullref{sec:integrity}. For the chunk discarding protocol, the space following the protocol is filled with payload data, this is beneficial to the covertness of the channel as the sender has to resend the previous data segments, and without this offset the fields would be repeated, which would be suspicious to an observer.
 
 For protocols that do not have auxiliary data to be sent with them, the following data bits are assigned at random, this has no benefit to the covertness of the channel since the payload is encrypted and thus appears random, however, the added complexity of the protocol for the tradeoff of bits did not seem worth it.
-
 
 \subsection{Protocol compression}
 
@@ -419,7 +428,7 @@ The sender must then resend the previous chunk of data again, but this would cau
 \section{Channel failures}
 \label{sec:channel_failures}
 
-There are scenarios where the channel for communication no longer works, this could be of a change in the environment or a warden that has prevented the channel. In these scenarios the framework must be able to recover the communication effort, the sender and receiver need a sort of fallback channel that they can use to restart communication. However, if the fallback channel was the one being blocked then the communication would have to end, even if other channels were viable.
+There are scenarios where the channel for communication no longer works, this could be of a change in the environment or a warden that has prevented the channel. In these scenarios the framework must be able to recover the communication effort, the sender and receiver need a fallback channel that they can use to restart communication. However, if the fallback channel was the one being blocked then the communication would have to end, even if other channels were viable.
 
 To prevent this, a recovery mode is defined for the framework, in this mode the receiver is open to all channels, and the sender will iterate through possible channels until it finds one that works. To prevent this from happening unintentionally the recovery mode is only entered when:
 \begin{itemize}
@@ -439,6 +448,6 @@ When the receiver is recovered, it will send an integrity check back to the send
 \subsection{Penalising methods}
 \label{sec:penalising}
 
-This recovery process is not great for covert communication, and causes the sender to try multiple channels, if these other channels are blocked then it can raise suspicions, to discourage this we penalise methods.
+This recovery process is not ideal for covert communication, and causes the sender to try multiple channels, if these other channels are blocked then it can raise suspicions, to discourage this we penalise methods.
 
-When a method fails twice, causing the recovery process to occur, it receives a penalty of -90\% to its score. This penalty lasts for 30 packets of valid data communication and prevents the method from being chosen again unless there are no better alternatives. The reason we do not permanently block the protocol is that it can fail for temporary reasons, but we cannot know that until we try again, It is not a good idea to constantly retry failing methods as if they are being caught by wardens then it is much more suspicious for many packets to have been blocked rather than just a few.
+When a method fails twice, causing the recovery process to occur, it receives a penalty of -90\% to its score. This penalty lasts for 30 packets of valid data communication and prevents the method from being chosen again unless there are no better alternatives. The reason we do not permanently block the protocol is that it can fail for temporary reasons, but we cannot know that until we try again, It is undesirable to constantly retry failing methods as if they are being caught by wardens it is much more suspicious for many packets to have been blocked rather than just a few.

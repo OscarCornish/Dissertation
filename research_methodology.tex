@@ -20,10 +20,11 @@ The requirements of the testing environment are as follows:
     \item The environment must be controlled, and completely isolated from the non-testing network. % 7
 \end{enumerate}
 
-
 Requirements 1-5 are required to ensure that testing is possible, and that test results are repeatable and comparable. The 6th requirement is a product of my limited resources, and the 7th is due to the limitations of my ethical approval.
 
 These requirements can be met by creating a virtual network, many tools allow for this but in order for the framework to be possible the tool must allow for raw socket access.
+
+\section{Evaluating Docker}
 
 Docker \citep{docker} is a tool that allows for the creation of containers inside virtual environments, these containers are lightweight and therefore many can be run on a single machine. this allows for an approach where each function has its container that can be altered as needed. For example, the sender and receiver exist as separate containers, and the traffic generator exists separately from them as well. This makes it easy to restructure and alter the environment as needed.
 
@@ -36,7 +37,7 @@ Another issue with Docker was the framework didn't work while using it, whereas 
 Network namespaces are a Linux kernel feature that allows for the creation of virtual network stacks, allowing the simulation of multiple network interfaces. The namespaces came with some other advantages:
 
 \begin{itemize}
-    \item The framework runs on bare metal, there is no added overhead of starting a virtual machine.
+    \item The framework runs on bare metal (without virtualisation), there is no added overhead of starting a virtual machine.
     \item They exist in the same filesystem as the host, allowing for easy access to the framework source code.
     \item Adding devices and connecting namespaces is easy and scriptable.
 \end{itemize}
@@ -58,7 +59,7 @@ A shortcoming of the network namespace is how the traffic moves between namespac
 
 \subsection{Traffic generation}
 
-The traffic generator is responsible for making the environment appear to be a real-world network, for this to also be repeatable the traffic must be generated in a deterministic way. This is done by using tcpdump, a tool that allows packet captures to be replayed via a network interface, allowing a single packet capture to be replayed multiple times.
+The traffic generator is responsible for making the environment appear to be a real-world network, for this to also be repeatable the traffic must be generated in a deterministic way. This is done by using tcpdump, a tool that allows packet captures to be replayed via a network interface, allowing a single packet capture (stored as a "pcap" file) to be replayed multiple times.
 
 The next step is then getting a capture of real-world traffic, as per my ethical approval I am not allowed to capture traffic that contains other people's data, so I instead found a public dataset \url{https://www.first.org/conference/2015/program#phands-on-network-forensics} that contains 24 hours of network traffic, that contains no personal information. It should be noted that the dataset is originally intended for use in forensics, but we aren't looking at the contents of the packets so this is not a concern.
 
@@ -84,9 +85,9 @@ The dependencies of the project are managed by the Julia package manager, it use
 
 A unique situation arose during the writing of this paper, where a major update was released for Julia, however since I had already begun testing on the previous version, I chose to abstain from updating to the new version. There is not any reason that the code would be incompatible with the new version, but the performance improvements of the newer version would make some of the results incomparable.
 
-The other external dependency used is libpcap \citep{libpcap}, I could include a copy of the library in the repository, but The Tcpdump Group has a good record of compatibility of its library, and then a system specific version can be installed. This is done using the system package manager of choice. 
+The other external dependency used is libpcap \citep{libpcap}, I could include a copy of the library in the repository, but The Tcpdump Group has a good record of compatibility of its library, and then a system-specific version can be installed. This is done using the system package manager of choice. 
 
-\subsection{Detecting a covert channel}
+\subsection{Covert detection bias}
 
 I am in a unique situation as the author of this paper, where I know the implementation of the covert channel, and thus detecting the channel is an easier task for me than it would be for an adversary. However, as it is a secure steganographic system \citep{SaW}, my knowledge of the implementation should not allow the detection of the channel with reasonable certainty.
 
