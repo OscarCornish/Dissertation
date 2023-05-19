@@ -42,7 +42,7 @@ encode(m::covert_method{:IPv4_Identification}, payload::String; template::Dict{S
 decode(::covert_method{:IPv4_Identification}, pkt::Packet)::UInt16 = pkt.payload.payload.header.id
 \end{lstlisting}
 
-This implementation makes use of Julia's multiple dispatch system, allowing for different functions to be called depending on the type of arguments. the three defined functions \inline{init}, \inline{encode}, and \inline{decode} are called with the covert channel as the first argument.
+This implementation makes use of Julia's multiple dispatch system, allowing for different functions to be called depending on the type of arguments. The three defined functions \inline{init}, \inline{encode}, and \inline{decode} are called with the covert channel as the first argument.
 
 I designed the covert channels to be a composite parametric type, where the type parameter is the type of channel, this prevents ambiguity when the multiple dispatch system is used. The parametric type definition looks like this:
 
@@ -246,3 +246,4 @@ An oversight of the integrity process outlined in the \fullref{sec:integrity} se
 This worked, however, the final integrity check always failed. The reason for this was the sender was creating the integrity check using the payload, but the receiver was creating the integrity check using the payload and the padding, meaning that despite the data being the same, the integrity check was different. To solve this problem, I added a variable \inline{final\_padding} (see line 2 of figure \ref{fig:chal_resp}) that is an empty string unless it is the final chunk, in which case it is the padding added to the payload to fill the channel capacity. 
 
 The implementation of this is spread across the entire \inline{send\_covert\_packet} function and thus is difficult to show in a code snippet, but it can be seen in the source code (\url{/src/outbound/packets.jl}).
+

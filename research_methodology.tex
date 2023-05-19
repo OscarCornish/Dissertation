@@ -3,7 +3,7 @@
 \section{Research goals}
 
 The goal of this research is to determine whether an adaptive covert communication system is feasible, and if so, to what extent. This will be done by creating a framework for an adaptive covert communication system.
-In order to evaluate the framework against the objectives outlined in \fullref{ch:objectives},  a testing environment is required.
+In order to evaluate the framework against the objectives outlined in \fullref{ch:objectives}, a testing environment is required.
 
 \section{The testing environment}
 \label{sec:testing_environment}
@@ -21,13 +21,13 @@ The requirements of the testing environment are as follows:
 \end{enumerate}
 
 
-Requirements 1-5 are required to ensure that testing is possible, and that test results are repeatable and comparable. The 6th requirement is a product of our limited resources, and the 7th is due to the limitations of my ethical approval.
+Requirements 1-5 are required to ensure that testing is possible, and that test results are repeatable and comparable. The 6th requirement is a product of my limited resources, and the 7th is due to the limitations of my ethical approval.
 
 These requirements can be met by creating a virtual network, many tools allow for this but in order for the framework to be possible the tool must allow for raw socket access.
 
-Docker \cite{docker} is a tool that allows for the creation of containers inside virtual environments, these containers are lightweight and thus allow for many to be run on a single machine, this allows for an approach where each function has its container that can be altered as needed. For example, the sender and receiver exist as separate containers, and the traffic generator exists separately from them as well. This makes it easy to restructure and alter the environment as needed.
+Docker \citep{docker} is a tool that allows for the creation of containers inside virtual environments, these containers are lightweight and therefore many can be run on a single machine. this allows for an approach where each function has its container that can be altered as needed. For example, the sender and receiver exist as separate containers, and the traffic generator exists separately from them as well. This makes it easy to restructure and alter the environment as needed.
 
-The shortcomings of Docker however was the lack of ability to capture the traffic of the entire network from inside the environment, it instead had to be done by the host machine. This is not ideal as we'd like to be able to have a completely closed system that can be run in multiple instances to collect data from multiple runs. This would be a useful feature in testing as the covert channels are slow and thus data takes a long time to collect.
+The shortcomings of Docker however was the lack of ability to capture the traffic of the entire network from inside the environment, it instead had to be done by the host machine. This is not ideal as I'd like to be able to have a completely closed system that can be run in multiple instances to collect data from multiple runs. This would be a useful feature in testing as the covert channels are slow and thus data takes a long time to collect.
 
 Another issue with Docker was the framework didn't work while using it, whereas it did work on my host. Later on in the project, I discovered that the checksum calculations were incorrect, causing the packets to be discarded at the bridge, it is possible that this issue was occurring in Docker, but I had already settled on a different environment at this point.
 
@@ -70,11 +70,11 @@ Both the framework and the testing environment must remain the same for testing 
 
 \subsubsection{Source control}
 
-To ensure testing is repeatable, the source code that is used must remain the same, and the versions of the dependencies must also remain the same. I achieved using git \cite{git}, a version control system that allows for the tracking of changes to files, and the ability to revert to previous versions. Each commit of changes is uniquely identifiable so it is easy to identify which version of the code was used for a particular test.
+To ensure testing is repeatable, the source code that is used must remain the same, and the versions of the dependencies must also remain the same. I achieved using git \citep{git}, a version control system that allows for the tracking of changes to files, and the ability to revert to previous versions. Each commit of changes is uniquely identifiable so it is easy to identify which version of the code was used for a particular test.
 
 Since the testing environment is a superset of the framework, the framework is included as a submodule of the testing environment, this points to a particular commit of the framework, so the framework can be updated independently of the testing environment. This also ensured that commits were atomic and incremental.
 
-For a remote backup of code, I used a private repository on Github \cite{github}, this allowed for the code to be accessed from anywhere, and will allow for the code to be open-sourced in the future.
+For a remote backup of code, I used a private repository on Github \citep{github}, this allowed for the code to be accessed from anywhere, and will allow for the code to be open-sourced in the future.
 
 \subsubsection{Dependency management}
 
@@ -82,11 +82,11 @@ The dependencies of the project are managed by the Julia package manager, it use
 
 \subsubsection{External dependencies}
 
-A unique situation arose during the writing of this paper, where a major update was released for Julia, since I had already begun testing on the previous version, I chose to abstain from updating to the new version, not that there is any reason that the code would not be compatible with the new version, the performance improvements of the newer version would make some of the results incomparable.
+A unique situation arose during the writing of this paper, where a major update was released for Julia, however since I had already begun testing on the previous version, I chose to abstain from updating to the new version. There is not any reason that the code would be incompatible with the new version, but the performance improvements of the newer version would make some of the results incomparable.
 
-The other external dependency used is libpcap \cite{libpcap}, I could include a copy of the library in the repository, but The Tcpdump Group has a good record of compatibility of its library, and then a system specific version can be installed. This is done using the system package manager of choice. 
+The other external dependency used is libpcap \citep{libpcap}, I could include a copy of the library in the repository, but The Tcpdump Group has a good record of compatibility of its library, and then a system specific version can be installed. This is done using the system package manager of choice. 
 
 \subsection{Detecting a covert channel}
 
-I am in a unique situation as the author of this paper, where I know the implementation of the covert channel, and thus detecting the channel is an easier task for me than it would be for an adversary. However, as it is a secure steganographic system \cite{SaW}, my knowledge of the implementation should not allow the detection of the channel with reasonable certainty.
+I am in a unique situation as the author of this paper, where I know the implementation of the covert channel, and thus detecting the channel is an easier task for me than it would be for an adversary. However, as it is a secure steganographic system \citep{SaW}, my knowledge of the implementation should not allow the detection of the channel with reasonable certainty.
 
