@@ -1,0 +1,3295 @@
+\chapter{Codebase}
+\section{FaucetEnv/namespaces.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+
+FAUCET_PREFIX = "FaucetNS"
+
+cmdify(s::String) = Cmd(String.(split(s, " ")))
+
+function run_str(s::String)::Nothing
+    run(cmdify(s))
+    return nothing
+end
+
+function get_namespaces()::Vector{String}
+    return readlines(`ip netns ls`)
+end
+
+get_faucet_namespaces() = filter(x -> startswith(x, FAUCET_PREFIX), get_namespaces())
+
+ns(name::String) = name == "" ? "" : "ip netns exec $FAUCET_PREFIX$name "
+
+function create_namespace(name::String, netns::String="")::Nothing
+    run_str("ip netns add $FAUCET_PREFIX$name")
+end
+
+function delete_namespace(name::String)::Nothing
+    run_str("ip netns del $FAUCET_PREFIX$name")
+end
+
+function create_veth_pair(name1::String, name2::String, netns::String="")::Nothing
+    run_str("$(ns(netns))ip link add $FAUCET_PREFIX$name1 type veth peer name $FAUCET_PREFIX$name2")
+end
+create_veth_pair(name::String, netns::String="") = create_veth_pair("$(name)a", "$(name)b", netns)
+
+function move_dev(name::String, dest_ns::String, source_ns::String="")::Nothing
+    run_str("$(ns(source_ns))ip link set $FAUCET_PREFIX$name netns $FAUCET_PREFIX$dest_ns")
+end
+
+function set_dev_address(dev::String, cidr::String, netns::String="")::Nothing
+    run_str("$(ns(netns))ip a add $cidr dev $FAUCET_PREFIX$dev")
+end
+
+function set_dev_up(dev::String, netns::String="")::Nothing
+    run_str("$(ns(netns))ip link set $FAUCET_PREFIX$dev up")
+end
+
+function create_bridge(name::String, netns::String="")::Nothing
+    run_str("$(ns(netns))ip link add $FAUCET_PREFIX$name type bridge")
+end
+
+function add_bridge_device(name::String, bridge::String, netns::String="")::Nothing
+    run_str("$(ns(netns))ip link set $FAUCET_PREFIX$name master $FAUCET_PREFIX$bridge")
+end
+
+get_devs(netns::String="")::String = read(cmdify("$(ns(netns))ip a"), String)
+
+
+# +---------------------------+
+# | ns: bridge                |
+# |                           |
+# |            br0            |
+# |           /   \           |
+# |     sendb      recvb      |
+# |                           |
+# +---------------------------+
+
+# +---------------------------+
+# | ns: sender                |
+# |                           |
+# |          senda            |
+# |                           |
+# +---------------------------+
+
+# +---------------------------+
+# | ns: receiver              |
+# |                           |
+# |          recva            |
+# |                           |
+# +---------------------------+
+
+# All have FAUCET_PREFIX prepended to them
+
+
+NAMESPACES = ["bridge", "sender", "receiver", "aux"]
+
+function create_Faucet_env()::Nothing
+    @info "Created namespaces." NAMESPACES
+    create_namespace.(NAMESPACES)
+    @info "Faucet namespaces" get_faucet_namespaces()
+
+    # Create sender veth pairs
+    create_veth_pair("senda", "sendb", "sender")
+    # Move senderb to bridge namespace
+    move_dev("sendb", "bridge", "sender")
+    set_dev_address("senda", "10.20.30.3/24", "sender")
+
+    # Create receiver veth pairs
+    create_veth_pair("recva", "recvb", "receiver")
+    # Move receiverb to bridge namespace
+    move_dev("recvb", "bridge", "receiver")
+    set_dev_address("recva", "10.20.30.2/24", "receiver")
+
+    # Create aux veth pairs
+    create_veth_pair("auxa", "auxb", "aux")
+    # Move auxb to receiver namespace
+    move_dev("auxb", "bridge", "aux")
+    set_dev_address("auxa", "10.20.30.201/24", "aux")
+
+    # Create bridge
+    create_bridge("br0", "bridge")
+
+    # Add senderb and receiverb to bridge
+    add_bridge_device("sendb", "br0", "bridge")
+    add_bridge_device("recvb", "br0", "bridge")
+    add_bridge_device("auxb", "br0", "bridge")
+
+    bridge_devs = get_devs("bridge")
+    sender_devs = get_devs("sender")
+    receiver_devs = get_devs("receiver")
+
+    # Bring devices up
+    set_dev_up("senda", "sender")
+    set_dev_up("sendb", "bridge")
+
+    set_dev_up("recva", "receiver")
+    set_dev_up("recvb", "bridge")
+    
+    set_dev_up("auxa", "aux")
+    set_dev_up("auxb", "bridge")
+
+    set_dev_up("br0", "bridge")
+
+    @debug "Devs created and setup" bridge_devs sender_devs receiver_devs 
+    return nothing
+end
+
+function teardown()::Nothing
+    @info "Deleting namespaces." NAMESPACES
+    delete_namespace.(NAMESPACES)
+    @info "Faucet namespaces" get_faucet_namespaces()
+    return nothing
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Test.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+# sudo -E julia Test.jl
+
+for i=1:256
+    run(`bash Test $i`)
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Traffic/rebase\_pcap.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+# Take pcap file, and the address range to rebase.
+# Args:
+#   1 - Pcap file : String
+#   2 - Address range to rebase : String
+#   3 - New address range : String
+#   4 - Excluded addresses : String (csv)
+
+# Example:
+#  rebase_pcap.jl test.pcap 192.168.0.0 10.0.0.0 10.20.30.1,10.20.30.2
+
+# !!! only does /24 ranges at the moment !!!
+
+struct IpAddr
+    octet1::UInt8
+    octet2::UInt8
+    octet3::UInt8
+    octet4::UInt8
+    IpAddr(s::String) = new(parse.(UInt8, split(s, "."))...)
+end
+
+addr(o::Vector{UInt8}) = join(string.(Int64.(o)), ".")
+
+function pcap_addr_stats(pcapf::String, range::Vector{UInt8})::Vector{UInt8} # Vector of endpoints
+    ref_dict = Dict{UInt8, Int64}()
+    # Read pcap as bytes
+    pcap = Vector{UInt8}()
+    open(pcapf, "r") do f
+        readbytes!(f, pcap, typemax(Int64))
+    end
+    println("Pcap length: $(length(pcap))")
+    # search for range in Pcap
+    for i in 1:length(pcap)-length(range)-1
+        if pcap[i:i+length(range)-1] == range
+            last_octet = pcap[i+length(range)]
+            if haskey(ref_dict, last_octet)
+                ref_dict[last_octet] += 1
+            else
+                ref_dict[last_octet] = 1
+            end
+        end
+    end
+    # Print stats
+    for (oct, count) ∈ ref_dict
+        println("Octet: $(addr(vcat(range, oct))), Count: $count")
+    end
+    return Vector{UInt8}([k for k ∈ keys(ref_dict)])
+end
+
+excluded_octects = parse.(UInt8, last.(split.(split(ARGS[4], ","), ".")))
+println("Excluded octets: $excluded_octects")
+
+pcapf = ARGS[1]
+from = IpAddr(ARGS[2])
+to = IpAddr(ARGS[3])
+from_range = [from.octet1, from.octet2, from.octet3]
+to_range = [to.octet1, to.octet2, to.octet3]
+
+println("\n")
+
+octs = pcap_addr_stats(pcapf, from_range)
+
+remap = Dict{UInt8, UInt8}()
+
+for o ∈ excluded_octects
+    while true
+        choice = rand(UInt8)
+        if choice ∉ octs && choice ∉ values(remap) && choice ∉ excluded_octects
+            remap[o] = choice
+            break
+        end
+    end
+end
+
+
+println("\n")
+
+function rebase(pcapf::String, fromrange::Vector{UInt8}, torange::Vector{UInt8}, remap::Dict{UInt8, UInt8})::NTuple{2, String}
+    # Read pcap as bytes
+    pcap = Vector{UInt8}()
+    open(pcapf, "r") do f
+        readbytes!(f, pcap, typemax(Int64))
+    end
+    range_length = length(fromrange)
+    # search for range in Pcap
+    for i in 1:length(pcap)-range_length-1
+        if pcap[i:i+range_length-1] == fromrange
+            last_octet = pcap[i+range_length]
+            if last_octet ∈ excluded_octects
+                pcap[i+range_length] = remap[last_octet]
+            end
+            pcap[i:i+range_length-1] = torange
+        end
+    end
+    # Write new pcap
+    name = join(vcat("rebased", split.(pcapf, ".")[2:end]), ".")
+    rebased_name = "Dirty/" * name
+    open(rebased_name, "w") do f
+        write(f, pcap)
+    end
+    pcap_addr_stats(rebased_name, torange)
+    return (rebased_name, "Rebased/"*name)
+end
+
+(broken_checksum, fixed) = rebase(pcapf, from_range, to_range, remap)
+
+run(Cmd(["python3", "fix_checksum.py", broken_checksum, fixed]))
+\end{lstlisting}
+\section{FaucetEnv/Faucet/test/t\_utils.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+include("../src/utils.jl")
+
+@testset "Utils" begin
+	@test IPv4Addr("192.168.0.1").host == 0xc0a80001
+	@test string(IPv4Addr("192.168.0.1")) == "192.168.0.1"
+	@test IPv4Addr([0xc0, 0xa8, 0x00, 0x01]).host == 0xc0a80001
+end
+\end{lstlisting}
+\section{FaucetEnv/Faucet/test/runtests.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+using Test
+
+include("t_utils.jl")
+
+
+@testset "Whole program" begin
+	# Setup
+	include("../src/main.jl")
+	using ..Inbound: init_receiver, listen
+	using ..CovertChannels: covert_methods
+	using .Outbound: init_environment, send_covert_payload
+	using .Environment: init_queue
+
+	# Init receiver queue first, so it doesn't miss anything
+	queue = init_receiver(:local)
+
+	# Then setup the sender
+	net_env = init_environment(target, init_queue())
+	covert_payload = Vector{UInt8}("Hello covert world!")
+	send_covert_payload(covert_payload, covert_methods, net_env)
+
+	# Then listen for the response
+	data = listen(queue, covert_methods)
+
+	@test data == covert_payload
+
+end
+
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/docs/make.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+using Documenter, DocumenterMarkdown
+using Faucet
+
+makedocs(
+    format = Documenter.HTML(),
+    sitename = "Faucet",
+    modules = [Faucet]
+)
+
+# Documenter can also automatically deploy documentation to gh-pages.
+# See "Hosting Documentation" and deploydocs() in the Documenter manual
+# for more information.
+#=deploydocs(
+    repo = "<repository url>"
+)=#
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/Faucet.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+module Faucet
+
+    """
+        WARNING!!
+
+        The module structure here is incorrect, and simply for the benefit of autodoc creation
+    """
+
+    PADDING_METHOD=:covert
+
+    include("CircularChannel.jl")
+    include("constants.jl")
+    include("utils.jl")
+
+    module Environment
+
+        #import Layer_type, get_ip_from_dev, IPv4Addr, _to_bytes, CircularChannel
+        import ..Layer_type, ..CircularChannel, ..get_ip_from_dev, ..IPv4Addr, .._to_bytes, ..ENVIRONMENT_QUEUE_SIZE
+
+        export init_queue
+
+        include("environment/headers.jl")
+        include("environment/query.jl")
+        include("environment/bpf.jl")
+        include("environment/queue.jl")
+        include("environment/env_utils.jl")
+
+    end
+
+    module CovertChannels
+
+        import ..Layer_type, ..IPv4, ..Network_Type, ..TCP, ..Transport_Type, ..CircularChannel, ..MINIMUM_CHANNEL_SIZE
+        using ..Environment: Packet, get_tcp_server, get_queue_data, get_layer_stats, get_header, get_local_host_count
+
+        export covert_methods
+
+        include("covert_channels/covert_channels.jl")
+        include("covert_channels/microprotocols.jl")
+        
+    end
+
+    module Outbound
+
+        struct Target end
+        target = Target()
+
+        import ..IPv4Addr, ..Network_Type, ..Transport_Type, ..Link_Type, ..Ethernet, ..IPv4, ..TCP, ..UDP, ..ARP, ..to_bytes, ..ip_address_regex, ..ip_route_regex, ..ip_neigh_regex, ..mac, ..to_net, .._to_bytes, ..integrity_check, ..PADDING_METHOD, ..remove_padding, ..CircularChannel
+        using ..CovertChannels: craft_change_method_payload, craft_discard_chunk_payload, craft_sentinel_payload, craft_recovery_payload, method_calculations, determine_method, covert_method, init, encode
+        using ..Environment: Packet, get_socket, sendto, await_arp_beacon, get_local_net_host, AF_PACKET, SOCK_RAW, ETH_P_ALL, IPPROTO_RAW
+
+        include("outbound/environment.jl")
+        include("outbound/packets.jl")
+
+    end
+
+    module Inbound
+
+        import ..MINIMUM_CHANNEL_SIZE, ..integrity_check, ..IPv4Addr, ..PADDING_METHOD, ..remove_padding, ..CircularChannel
+        using ..Environment: init_queue, local_bound_traffic, Packet, get_local_ip
+        using ..CovertChannels: SENTINEL, DISCARD_CHUNK, couldContainMethod, decode, covert_method, extract_method
+        using ..Outbound: ARP_Beacon
+
+        include("inbound/listen.jl")
+
+    end
+
+end # module Faucet
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/CircularChannel.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+# Define a "CircularChannel", a thread-safe channel, that will overwrite the oldest data when full
+# Heavily inspired by:
+# https://github.com/JuliaCollections/DataStructures.jl/blob/master/src/circular_buffer.jl
+
+"""
+    CircularChannel{T}(sz::Int) where T
+```
+A thread-safe channel, that will overwrite the oldest data when full
+Implements:
+    - put!(cc::CircularChannel{T}, data::T)
+    - take!(cc::CircularChannel{T})::T
+    - length(cc::CircularChannel{T})::Int
+    - size(cc::CircularChannel{T})::Tuple{Int}
+    - isempty(cc::CircularChannel{T})::Bool
+    - convert(::Vector{T}, cc::CircularChannel{T})::Vector{T}
+```
+"""
+mutable struct CircularChannel{T} <: AbstractVector{T}
+    capacity::Int
+    @atomic first::Int
+    @atomic length::Int
+    buffer::Vector{T}
+    lock::Threads.Condition
+
+    function CircularChannel{T}(first::Int, len::Int, buf::Vector{T}) where {T}
+        first <= length(buf) && len <= length(buf) || error("Value of 'length' and 'first' must be in the buffers bounds")
+        return new{T}(length(buf), first, len, buf, Threads.Condition())
+    end
+end
+
+# Short hand
+CircularChannel{T}(sz::Int) where T = CircularChannel{T}(1, 0, Vector{T}(undef, sz))
+
+# Check bounds
+Base.@propagate_inbounds function _buffer_index_checked(cc::CircularChannel, i::Int)
+    @boundscheck if i < 1 || i > cc.length
+        throw(BoundError(cc, i))
+    end
+    _buffer_index(cc, i)
+end
+
+# Implement the "circular" functionality
+@inline function _buffer_index(cc::CircularChannel, i::Int)
+    n = cc.capacity
+    idx = cc.first + i - 1
+    return ifelse(idx > n, idx - n, idx)
+end
+
+# Get index and set index are only intended for internal use, only "supported" functions are put! and coverting to a vector
+
+# Override getindex to use our circular functionality
+@inline Base.@propagate_inbounds function Base.getindex(cc::CircularChannel, i::Int)
+    @lock cc.lock return cc.buffer[_buffer_index_checked(cc, i)]
+end
+
+# Override setindex to use our circular functionality
+@inline Base.@propagate_inbounds function Base.setindex(cc::CircularChannel, data, i::Int)
+    @lock cc.lock cc.buffer[_buffer_index_checked(cc, i)] = data && return cc
+end
+
+@inline function Base.put!(cc::CircularChannel{T}, data) where T
+    lock(cc.lock)
+    try
+        data_converted = convert(T, data)
+        if cc.length == cc.capacity
+            @atomic cc.first = (cc.first == cc.capacity ? 1 : cc.first + 1)
+        else
+            @atomic cc.length += 1
+        end
+        @inbounds cc.buffer[_buffer_index(cc, cc.length)] = data_converted
+        notify(cc.lock)
+        return cc
+    finally
+        unlock(cc.lock)
+    end
+end
+
+@inline function Base.take!(cc::CircularChannel{T}) where T
+    lock(cc.lock)
+    try
+        if cc.length == 0
+            wait(cc.lock)
+        end
+        @atomic cc.length -= 1
+        return cc.buffer[_buffer_index(cc, cc.length + 1)]
+    finally
+        unlock(cc.lock)
+    end
+end
+
+# Define some generic functions
+Base.length(cc::CircularChannel) = @atomic cc.length
+Base.size(cc::CircularChannel) = (length(cc), )
+Base.isempty(cc::CircularChannel) = length(cc) == 0
+
+# Extract the data from the channel, in order
+function Base.convert(::Vector{T}, cc::CircularChannel{T}) where T
+    lock(cc.lock)
+    try
+        first = cc.buffer[cc.first:cc.length]
+        second = cc.buffer[1:cc.first-1]
+        return Vector{T}[first; second]
+    finally
+        unlock(cc.lock)
+    end
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/constants.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+#=
+
+    Define program constants
+
+=#
+
+# Program related constants
+const ENVIRONMENT_QUEUE_SIZE = 150
+const MINIMUM_CHANNEL_SIZE   = 4
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/covert\_channels/microprotocols.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+#=
+
+    Micro protcol definitions
+    
+    *Protocols can be larger than the smallest channel*
+    - But must not rely on it
+        - Exception here is for recovering the channel, which is a special case
+    - DISCARD_CHUNK for example is padded with payload bits, but if there is not the capacity for it, then it isnt.
+
+    Protocols are passed through the covert channel,
+     the first channel used will be the most covert for the time being.
+
+    Main protocols:
+
+        first bit == 0b0 (MP_DATA)
+            => Following bits are all data
+        first bit == 0b1 (MP_META)
+            => Following bits are meta
+    
+    Meta protocols:
+
+        Taking smallest as Y bits (including MP_META)
+        X = Y - 1 (Ignore the META flag)
+
+        X bits -> 2ˣ permutations
+            1 -> sentinel value
+            2ˣ- 1 -> DISCARD_CHUNK signal
+            2ˣ- 2 -> protocols
+        
+        first X bits == "1" ^ X
+            => Sentinel value (Start / end communication)
+        otherwise
+            => index in covert_channels / DISCARD_CHUNK
+
+=#
+
+const SENTINEL = parse(UInt16, "1"^(MINIMUM_CHANNEL_SIZE), base=2)
+const DISCARD_CHUNK = SENTINEL - 1
+
+#=
+
+    Payload crafting functions
+
+=# 
+
+"""
+Take a unsigned integer (META_PROTOCOL) and pad it as required to fit a given capacity
+"""
+resize_payload(payload::Integer, capacity::Int)::String = resize_payload(UInt64(payload), capacity)
+function resize_payload(payload::Unsigned, capacity::Int)::String
+    content = bitstring(payload)[end-MINIMUM_CHANNEL_SIZE+1:end] # Get the last 5 bits
+    padding = join([rand(("1","0")) for i ∈ 1:(capacity - length(content))])
+    return content * padding # Pad with random bits
+end
+
+"""
+The DISCARD_CHUNK protocol is the meta_protocol,
+but padded with the more payload bits
+"""
+function craft_discard_chunk_payload(capacity::Int, bits::String, pointer::Int64)::Tuple{Int64, String}
+    chunk = bitstring(DISCARD_CHUNK)[end-MINIMUM_CHANNEL_SIZE+1:end]
+    pointer_offset = capacity - length(chunk)
+    payload = chunk * bits[pointer:pointer+pointer_offset-1]
+    @assert length(payload) == capacity
+    @assert pointer_offset == length(payload) - length(chunk)
+    return pointer_offset, payload
+end
+
+"""
+SENTINEL payload has no additional data just random padding
+"""
+craft_sentinel_payload(capacity::Int)::String = resize_payload(SENTINEL, capacity)
+
+"""
+Recovery payload has a specific format,
+to prevent false positives:
+```
+| MINIMUM_CHANNEL_SIZE | UInt8 | 4 bits | ...
+| verification_length | integrity ⊻ known_host | verification_length % 0x10 | padding
+```
+REQUIRES `method.capacity >= MINIMUM_CHANNEL_SIZE + 8 + 4`
+"""
+function craft_recovery_payload(capacity::Int, (verification_length, integrity)::Tuple{Int64, UInt8}, known_host::UInt8)::String
+    if capacity < MINIMUM_CHANNEL_SIZE + 8 + 4
+        @error "Capacity too small for recovery payload" capacity=capacity
+        return ""
+    end
+    meta = "1" ^ MINIMUM_CHANNEL_SIZE
+    meta *= bitstring(integrity ⊻ known_host)
+    payload = meta * bitstring(verification_length % 0x10)[end-3:end]
+    padding = join([rand(("1","0")) for i ∈ 1:(capacity - length(payload))])
+    @info "Recovery payload" vl=verification_length tl=verification_length % 0x10 meta payload
+    @assert length(payload) + length(padding) == capacity
+    return payload * padding
+end
+
+"""
+payload structure:
+```
+| MINIMUM_CHANNEL_SIZE | UInt8 | ...
+| Method_index | Offset | padding
+```
+If the capacity is too small, the offset is assumed to be 0.
+This loses the benefit of the offset but allows usability in smaller channels.
+"""
+function craft_change_method_payload(method_index::Int, offset::UInt8, capacity::Int)::String
+    meta = "1" * bitstring(method_index)[end-MINIMUM_CHANNEL_SIZE+2:end]
+    meta *= bitstring(offset)
+    padding = join([rand(("1","0")) for i ∈ 1:(capacity - length(meta))])
+    payload = (meta * padding)[1:capacity]
+    midx, key = extract_method(payload)
+    @assert midx == method_index
+    @assert key == offset
+    return payload
+end
+
+"""
+Remove the method index and offset from the method change payload.
+"""
+function extract_method(payload::String)::Tuple{Int, UInt8} # Method_index, key
+    key = parse(UInt8, lpad(payload[MINIMUM_CHANNEL_SIZE+1:min(MINIMUM_CHANNEL_SIZE+8, end)], 8, "0")[1:8], base=2)
+    method_index = parse(Int, payload[2:MINIMUM_CHANNEL_SIZE], base=2)
+    return method_index, key
+end
+
+#=
+
+    Micro protocol verification functions
+
+=#
+
+"""
+    channel_capacity_check(methods::Vector{covert_method})::Bool
+
+Check that the channel sizes are large enough to fit the microprotocols
+"""
+function channel_capacity_check(methods::Vector{covert_method})::Bool
+    for method ∈ methods
+        if method.payload_size < MINIMUM_CHANNEL_SIZE
+            @error "Channel size too small for protocol" channel=method.name size=method.payload_size
+            return false
+        end
+    end
+    return true
+end
+
+"""
+    registered_channel_check(methods::Vector{covert_method})::Bool
+
+Check that the number of channels is less than the sentinel value, and therefore can be addressed in our microprotocols
+"""
+function registered_channel_check(methods::Vector{covert_method})::Bool
+    if length(methods) >= SENTINEL - 1 # -1 for DISCARD_CHUNK
+        @error "Too many registered channels" channels=length(methods) max=SENTINEL-1
+        return false
+    end
+    return true
+end
+
+"""
+    channel_match_check(methods::Vector{covert_method})::Bool
+
+Check that the channels in the target match the channels in the microprotocols
+"""
+function channel_match_check(methods::Vector{covert_method})::Bool
+    names = [method.name for method ∈ methods]::Vector{String}
+    if length(names) != length(target.channels)
+        @error "Channels in target and microprotocols do not match" target=target.channels microprotocols=names
+        return false
+    else
+        for i=1:lastindex(names)
+            if names[i] != target.channels[i]
+                @error "Channels in target and microprotocols do not match" target=target.channels microprotocols=names index=i
+                return false
+            end
+        end
+    end
+    return true
+end
+
+"""
+Check that the microprotocols pass all the channel checks.
+see also: [`channel_capacity_check`](@ref), [`registered_channel_check`](@ref), [`channel_match_check`](@ref).
+"""
+function check_channels(methods::Vector{covert_method})::Bool
+    return all([
+        channel_capacity_check(methods),
+        registered_channel_check(methods),
+        channel_match_check(methods)
+    ])
+end
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/covert\_channels/covert\_channels.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+#=
+
+    Constant definitions
+
+=#
+
+const TCP_ACK           = 0x0010
+const TCP_SYN           = 0x0002
+const TCP_SYN_ACK       = 0x0012
+const TCP_PSH_ACK       = 0x0018
+
+#=
+
+    Covert channels
+
+=#
+
+struct covert_method{Symbol}
+    name::String # Readable name
+    layer::Layer_type # Layer it exists on
+    type::String # What packet type are we aiming for? (Packet will live at .layer)
+    covertness::Int8 # 1 - 10
+    payload_size::Int64 # bits / packet
+    covert_method(name::String, layer::Layer_type, type::String, covertness::Int64, payload_size::Int64)::covert_method{Symbol} = new{Symbol(name)}(name, layer, type, Int8(covertness), payload_size)
+end
+
+"""
+Checks if a packet has the structure to contain a covert packet of the given type.
+"""
+function couldContainMethod(packet::Packet, m::covert_method)::Any
+    # Verify the packet could be a part of the covert channel
+    return split(string(typeof(get_header(packet, m.layer))), ".")[end] == m.type
+end
+
+#=
+    TCP_ACK_Bounce abuses the TCP handshake,
+    by spoofing the source to the destination and sending a request to a server,
+    the server responds with an ACK# of the original packets ISN+1,
+    the reciver can then ISN-1 and decode using a predefined technique
+
+    - Target IP (In env)
+    - Target Mac (in env)
+    - TCP Server Mac (or first gw mac)
+    - TCP Server IP
+    - TCP Server Port
+
+=#
+
+tcp_ack_bounce::covert_method{:TCP_ACK_Bounce} = covert_method(
+    "TCP_ACK_Bounce",
+    Layer_type(4), # transport
+    "TCP_header",
+    3,
+    32 # 4 bytes / packet
+)
+
+# Init function for TCP_ACK_Bounce
+function init(::covert_method{:TCP_ACK_Bounce}, net_env::Dict{Symbol, Any})::Dict{Symbol, Any}
+    dest_mac, dest_ip, dport = get_tcp_server(net_env[:queue])
+
+    return Dict{Symbol, Any}(
+        :payload => Vector{UInt8}(),# ("Covert packet!"), # Obviously not a real payload
+        :env => net_env,
+        :network_type => IPv4::Network_Type,
+        :transport_type => TCP::Transport_Type,
+        :EtherKWargs => Dict{Symbol, Any}(
+            :dest_mac => dest_mac,
+            :source_mac => net_env[:src_mac]#net_env[:dest_first_hop_mac]
+        ),
+        :NetworkKwargs => Dict{Symbol, Any}(
+            :source_ip => net_env[:dest_ip].host,
+            :dest_ip => dest_ip
+        ),
+        :TransportKwargs => Dict{Symbol, Any}(
+            :flags => TCP_SYN::UInt16,
+            :dport => dport
+        )
+    )
+end
+
+# Encode function for TCP_ACK_Bounce
+function encode(::covert_method{:TCP_ACK_Bounce}, payload::UInt32; template::Dict{Symbol, Any})::Dict{Symbol, Any} 
+    template[:TransportKwargs][:seq] = payload - 0x1
+    return template
+end
+encode(m::covert_method{:TCP_ACK_Bounce}, payload::String; template::Dict{Symbol, Any})::Dict{Symbol, Any} = encode(m, parse(UInt32, payload, base=2); template=template)
+
+# Decode function for TCP_ACK_Bounce
+decode(::covert_method{:TCP_ACK_Bounce}, pkt::Packet)::UInt32 = pkt.payload.payload.payload.header.ack_num
+
+#=
+    IPv4_identification utilises the 'random' identification header,
+    this can be replaced with encrypted (so essentially random) data.
+=#
+
+ipv4_identifaction::covert_method{:IPv4_Identification} = covert_method(
+    "IPv4_Identification",
+    Layer_type(3), # network
+    "IPv4_header",
+    8,
+    16, # 2 bytes / packet
+)
+
+# Init function for IPv4_Identification
+function init(::covert_method{:IPv4_Identification}, net_env::Dict{Symbol, Any})::Dict{Symbol, Any}
+    target_mac, target_ip = net_env[:dest_first_hop_mac], net_env[:dest_ip].host
+    return Dict{Symbol, Any}(
+        :payload => Vector{UInt8}("Covert packet!"), # Obviously not a real payload
+        :env => net_env,
+        :network_type => IPv4::Network_Type,
+        :transport_type => TCP::Transport_Type,
+        :EtherKWargs => Dict{Symbol, Any}(
+            :dest_mac => target_mac,
+        ),
+        :NetworkKwargs => Dict{Symbol, Any}(
+            :dest_ip => target_ip,
+        )
+    )
+end
+
+# Encode function for IPv4_Identification
+function encode(::covert_method{:IPv4_Identification}, payload::UInt16; template::Dict{Symbol, Any})::Dict{Symbol, Any}
+    template[:NetworkKwargs][:identification] = payload
+    return template
+end
+encode(m::covert_method{:IPv4_Identification}, payload::String; template::Dict{Symbol, Any})::Dict{Symbol, Any} = encode(m, parse(UInt16, payload, base=2); template=template)
+
+# Decode function for IPv4_Identification
+decode(::covert_method{:IPv4_Identification}, pkt::Packet)::UInt16 = pkt.payload.payload.header.id
+
+"""
+Array of all covert methods, the order of these must be the same between sender & target
+"""
+covert_methods = Vector{covert_method}([
+    tcp_ack_bounce,
+    ipv4_identifaction,
+])
+
+
+"""
+```markdown
+Perform calculations for each covert_method based on the environment.
+
+Note:
+ - Blacklisted methods are penalised (-90% score)
+ - Current method is encouraged (+10% score)
+```
+"""
+function method_calculations(covert_methods::Vector{covert_method}, env::Dict{Symbol, Any}, Eₚ::Vector{Int64}=[], current_method::Int64=0)::NTuple{2, Vector{Float64}}
+    # Get the queue data
+    q = get_queue_data(env[:queue])
+
+    # Covert score, higher is better : Method i score = scores[i]
+    S = zeros(Float64, length(covert_methods))
+    # Rate at which to send covert packets : Method i rate = rates[i]
+    R = zeros(Float64, length(covert_methods))
+    
+    if isempty(q)
+        @error "No packets in queue, cannot determine method" q
+        return S, R
+    end
+    
+    #@warn "Hardcoded response to determine_method"
+    L = [get_layer_stats(q, Layer_type(i)) for i ∈ 2:4]
+
+    # Eₗ : Environment length : Number of packets in queue
+    Eₗ = length(q)
+
+    # Eᵣ : Environment rate : (Packets / second)
+    Eᵣ = Eₗ / abs(last(q).cap_header.timestamp - first(q).cap_header.timestamp)
+
+    # Eₛ : Environment desired secrecy : User supplied (Default: 5)
+    Eₛ = env[:desired_secrecy]
+
+    Eₕ = get_local_host_count(q, env[:dest_ip])
+
+    for (i, method) ∈ enumerate(covert_methods)
+        Lᵢ_temp = filter(x -> method.type ∈ keys(x), L)
+        if isempty(Lᵢ_temp)
+            @warn "No packets with valid headers" method.type L
+            continue
+        end
+        # Lᵢ : the layer that method i exists on
+        Lᵢ = Lᵢ_temp[1]
+
+        # Lₛ : The sum of packets that have a valid header in Lᵢ
+        Lₛ = +(collect(values(Lᵢ))...)
+
+        # Lₚ : Percentage of total traffic that this layer makes up
+        Lₚ = Lₛ / Eₗ
+
+        # Pᵢ is the percentage of traffic 
+        Pᵢ = Lₚ * (Lᵢ[method.type] / Lₛ)
+
+        # Bᵢ is the bit capacity of method i
+        Bᵢ = method.payload_size
+
+        # Cᵢ is the penalty / bonus for the covertness
+        #  has bounds [0, 2] -> 0% to 200% (± 100%)
+        Cᵢ = 1 - ((method.covertness - Eₛ) / 10)
+
+        # Score for method i
+        #  Pᵢ * Bᵢ : Covert bits / Environment bits
+        #  then weight by covertness
+        #@info "S[i]" Pᵢ Bᵢ Cᵢ Pᵢ * Bᵢ * Cᵢ
+        S[i] = Pᵢ * Bᵢ * Cᵢ
+
+        # Rate for method i
+        #  Eᵣ * Pᵢ : Usable header packets / second
+        #  If we used this much it would be +100% of the environment rate, so we scale it down
+        #  by dividing by hosts on the network, Eₕ.
+        #  then weight by covertness
+        #  We don't want to go over the environment rate, so reshape covertness is between [0, 1] (1 being 100% of env rate)
+        #  (Eᵣ * Pᵢ * (Cᵢ / 2)) / Eₕ : Rate of covert packets / second
+        #  ∴ 1 / Eᵣ * Pᵢ * (Cᵢ / 2) : Interval between covert packets
+        #@info "R[i]" Eₕ Eᵣ Pᵢ Cᵢ/2 Eₕ / (Eᵣ * Pᵢ * (Cᵢ / 2))
+        R[i] = Eₕ  / (Eᵣ * Pᵢ * (Cᵢ / 2)) 
+    end
+
+    # Eₚ (arg) : Environment penalty : Penalty for failing to work previously
+    for i ∈ Eₚ
+        S[i] *= 0.1 # 10% of original score
+    end
+
+    current_method != 0 && (S[current_method] *= 1.1) # Encourage current method (+10%)
+
+    return S, R
+end
+
+"""
+Return the index of the method with the highest score, and the interval to send packets at.
+
+The calculations are done in [`method_calculations`](@ref)
+"""
+function determine_method(covert_methods::Vector{covert_method}, env::Dict{Symbol, Any}, penalities::Vector{Int64}=[], current_method::Int64=0)::Tuple{Int64, Float64}
+    # Determine the best method to use
+    S, R = method_calculations(covert_methods, env, penalities, current_method)
+
+    # i : index of best method
+    # Sᵢ : score of best method
+    Sᵢ, i = findmax(S)
+    # Rᵢ : rate of best method
+    Rᵢ = R[i]
+
+    if allequal([S..., 0.0])
+        # If all scores are 0 then we have no valid methods, default to 1, with a large time interval
+        return 1, 100.0
+    end
+    # @debug "Determined covert method" covert_methods[i].name score=Sᵢ rate=Rᵢ
+
+    # Sort scores by second value in pair (score) and return highest
+    return i, Rᵢ
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/inbound/listen.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+using AES
+using Dates
+import Base: -, >
+
+# These functions are to remove bulky lines from the listen function
+function -(a::Tuple{Float64, Int64}, b::Tuple{Float64, Int64})::Tuple{Float64, Int64}
+    # (a[1] - b[1], a[2] - b[2]) => a - b
+    return (a[1] - b[1], a[2] - b[2])
+end
+function >(a::Tuple{Float64, Int64}, b::Tuple{Float64, Int64})::NTuple{2, Bool}
+    # (a[1] > b[1], a[2] > b[2]) => a > b
+    return (a[1] > b[1], a[2] > b[2])
+end
+
+"""
+    dec(data::bitstring)::Vector{UInt8}
+
+Decode a packet using Pre-shared key
+ & removing padding
+"""
+function dec(_data::String)::Vector{UInt8}
+    data = remove_padding(_data)
+
+    # Convert to bytes
+    bytes = Vector{UInt8}()
+    if length(data) % 8 != 0
+        @error "Data is not a multiple of 8, either recieved additional packets, or missing some"
+        error("Data length not a multiple of 8")
+    end
+    bytes = [parse(UInt8, data[i:i+7], base=2) for i ∈ 1:8:length(data)]
+
+    # Recreate cipher text & cipher
+    ct = AES.CipherText(
+        bytes,
+        target.AES_IV,
+        length(target.AES_PSK) * 8,
+        AES.CBC
+    )
+    cipher = AES.AESCipher(;key_length=128, mode=AES.CBC, key=target.AES_PSK)
+    
+    decrypted = decrypt(ct, cipher).parent
+
+    padding = decrypted[end]
+    if decrypted[end-padding+1:end] == [padding for i in 1:padding]
+        return decrypted[1:end-padding]
+    else
+        return decrypted
+    end
+end
+    
+# Get queue with filter
+
+"""
+```markdown
+Initialise our receiver:
+- `:local` => Filter to only local traffic
+- `:all` => Filter to all traffic
+```
+"""
+function init_receiver(bpf_filter::Union{String, Symbol})::CircularChannel{Packet}
+    if bpf_filter == :local
+        bpf_filter = local_bound_traffic()
+    end
+    if bpf_filter == :all
+        bpf_filter = ""
+    end
+    @debug "Initializing receiver" filter=bpf_filter
+    if typeof(bpf_filter) != String
+        throw(ArgumentError("bpf_filter must be a string, :local, or :all"))
+    end
+    return init_queue(;bpf_filter_string=bpf_filter)
+end
+
+"""
+Check a packet against all methods, if it matches the format of a method, return the index of the method, else return -1
+This check uses the last know verification point, something that both sides know.
+"""
+function try_recover(packet::Packet, integrities::Vector{Tuple{Int, UInt8}}, methods::Vector{covert_method})::Tuple{Int64, Int64}
+    for (i, method) ∈ enumerate(methods)
+        if couldContainMethod(packet, method)
+            data = bitstring(decode(method, packet))
+            if length(data) >= MINIMUM_CHANNEL_SIZE + 12 && data[1:MINIMUM_CHANNEL_SIZE] == bitstring(SENTINEL)[end-MINIMUM_CHANNEL_SIZE+1:end]
+                offset = parse(UInt8, data[MINIMUM_CHANNEL_SIZE+1:MINIMUM_CHANNEL_SIZE+8], base=2)
+                transmission_length = parse(Int, data[MINIMUM_CHANNEL_SIZE+9:MINIMUM_CHANNEL_SIZE+12], base=2)
+                for (len, integrity) ∈ reverse(integrities)[1:min(end, 4)] # Go back max 4 integrities, to be safe
+                    @debug "Checking integrity of recovery packet" len=len integrity=integrity
+                    if len % 0x10 == transmission_length # The -1 is an artefact of the pointer on the sender side
+                        ARP_Beacon(integrity ⊻ offset, IPv4Addr(get_local_ip()))
+                        return i, len
+                    end
+                end
+            end
+        end
+    end
+    return -1, 0 # Not a recovery packet
+end
+
+"""
+Process a packet contain meta protocols
+"""
+function process_meta(data::String)::Tuple{Symbol, Any}
+    meta = data[1:MINIMUM_CHANNEL_SIZE]
+    if meta == bitstring(SENTINEL)[end-MINIMUM_CHANNEL_SIZE+1:end]
+        return (:sentinel, nothing)
+    elseif meta == bitstring(DISCARD_CHUNK)[end-MINIMUM_CHANNEL_SIZE+1:end]
+        return (:integrity_fail, data[MINIMUM_CHANNEL_SIZE+1:end])
+    else # Return 
+        return (:method_change, extract_method(data))
+    end
+end
+    
+"""
+Process a packet, returning the type of packet, and the data
+"""
+function process_packet(current_method::covert_method, packet::Packet)::Tuple{Symbol, Any}
+    if couldContainMethod(packet, current_method)
+        data = bitstring(decode(current_method, packet))
+        # check if data or meta
+        if data[1] == '0'
+            return (:data, data[2:end])
+        else
+            return process_meta(data)
+        end
+    end
+    return (:pass, nothing)
+end
+
+"""
+Await a covert communication, and return the decrypted data
+"""
+function listen(queue::CircularChannel{Packet}, methods::Vector{covert_method})::Vector{UInt8}
+    local_ip = get_local_ip()
+    # previous is essentially a revert, if a commited chunks integrity fails, we can revert to the previous state
+    data, previous, chunk = "", "", ""
+    # Track if we have recieved a sentinel
+    sentinel_recieved = false
+    # Default to the first method
+    current_method = methods[begin]
+    # Keep track of the number of packets recieved
+    packets = 0
+
+    # Recovery variables
+    # (transimission_length, integrity)
+    integrities = Vector{Tuple{Int, UInt8}}([(0, 0x0)])
+    last_interval_size = Tuple{Float64, Int64}[(20.0, 5)]
+    last_interval_point = Tuple{Float64, Int64}[(0.0, 0)]
+
+    # Await sentinel
+    @debug "Listening for sentinel" current_method.name
+    while true
+        current_point = Tuple{Float64, Int64}[(time(), packets)]
+        # Take a packet from the queue, to process it
+        packet = take!(queue)
+        
+        # If we have exceeded the size of the last interval (by packets or time), we should 
+        recovery = any(((current_point .- last_interval_point) .> last_interval_size)[1])
+        
+        # Process the packet, using our current method
+        type, kwargs = process_packet(current_method, packet)
+
+        # If we are in recovery mode, and the packet is not a method change (verification)
+        if recovery && type != :method_change
+            # Try to recover to a new method
+            (index, len) = try_recover(packet, integrities, methods)
+            if index != -1
+                # Recovery successful, reset the current chunk
+                chunk = ""
+                # Remove data past the last valid recovery point (senders POV)
+                data = data[1:len]
+                @info "Recovering to new method" method=methods[index].name
+                
+                # Incase we go straight into recovery mode
+                sentinel_recieved = true
+                # Update current method
+                current_method = methods[index]
+                # Change time of last interval, but don't update the size (recovery)
+                last_interval_point = current_point
+                # Don't process this packet any further (it could poison our chunk)
+                continue
+            end
+        end
+
+        # Check for sentinel
+        if type == :sentinel
+            if sentinel_recieved # If we have already recieved a sentinel, we have finished the data
+                break
+            end
+            @info "Sentined recieved, beginning data collection"
+            sentinel_recieved = true
+
+        # We put sentinel_recieved check first to fail fast
+        elseif sentinel_recieved && type == :method_change
+            (new_method_index, integrity_offset) = kwargs
+            @debug "Preparing for method change" new_method_index
+            
+            # On method change we confirm the integrity of the chunk, so get it
+            integrity = integrity_check(chunk)
+
+            # Beacon out integrity of chunk ⊻'d against the offset we received
+            @debug "Sleeping before arp... (5)" integrity=integrity offset=integrity_offset integrity⊻integrity_offset
+            sleep(5)
+            ARP_Beacon(integrity ⊻ integrity_offset, IPv4Addr(local_ip))
+            
+            # Update current method
+            current_method = methods[new_method_index]
+
+            # Save our old data, incase this integrity is wrong
+            previous = data
+
+            # Append chunk to data
+            data *= chunk
+            # Reset chunk
+            chunk = ""
+
+            # Update integrity list
+            push!(integrities, (length(data), integrity))
+            # Update last interval size
+            last_interval_size = current_point .- last_interval_point
+            # Update last interval point
+            last_interval_point = current_point
+        
+        elseif sentinel_recieved && type == :integrity_fail
+            @warn "Integrity check failed of last chunk, reverting..."
+            # Reset the chunk, and add the data that follows this metaprotocol
+            chunk = kwargs
+            # Remove last integrity, it was wrong...
+            pop!(integrities)
+            # Revert 'commit' of chunk
+            data = previous
+        
+        elseif sentinel_recieved && type == :data
+            @debug "Data received, adding to chunk" chunk_length=length(chunk) total_length=length(data) data=kwargs
+            # Append data to chunk
+            chunk *= kwargs
+            # Increment packets
+            packets += 1
+        end
+    end
+    # Append remaining chunk to data (Should be empty due to post-payload verification)
+    data *= chunk
+    @debug "Data collection complete, decrypting..."
+    return dec(data)
+end
+
+"""
+Listen forever will repeatedly call [`listen`](@ref) on the given queue, and write the data to a unique file
+"""
+function listen_forever(queue::Channel{Packet}, methods::Vector{covert_method})
+    while true
+        data = listen(queue, methods)
+        file = "comms/$(now().instant.periods.value).bytes"
+        @info "Communication stream finished, writing to file" file=file
+        open(file, "w") do io
+            write(io, data)
+        end
+    end
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/receiver.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+
+include("main.jl")
+
+using ..Inbound: init_receiver, listen # , listen_forever
+using ..CovertChannels: covert_methods
+
+queue = init_receiver(:local)
+
+@debug "Listening..."
+
+data = listen(queue, covert_methods)
+
+@info "Data recieved" covert_payload=String(data)
+
+sleep(10)
+exit(0)
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/outbound/environment.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+"""
+Get the mac address of the interface with the given ip
+
+This is a unstable wrapper around `ip a` and `ip neigh`
+"""
+function mac_from_ip(ip::String, type::Symbol=:local)::NTuple{6, UInt8}
+    if type == :local
+        for match ∈ eachmatch(ip_address_regex, readchomp(`ip a`))
+            if match[:ip] == ip
+                return mac(match[:mac])
+            end
+        end
+    elseif type == :remote
+        cmd_output = readchomp(`ip neigh`)
+        for match ∈ eachmatch(ip_neigh_regex, cmd_output)
+            if match[:ip] == ip
+                return mac(match[:mac])
+            end
+        end
+    else
+        error("Invalid type: $type")
+    end
+    error("Unable to find MAC address for IP: $ip")
+end
+mac_from_ip(ip::IPv4Addr, type::Symbol=:local)::NTuple{6, UInt8} = mac_from_ip(string(ip), type)
+
+"""
+Return the interface, gateway, and source ip for the given destination ip
+"""
+function get_ip_addr(dest_ip::String)::Tuple{String, Union{IPv4Addr, Nothing}, IPv4Addr} # Interface, Gateway, Source
+    for match ∈ eachmatch(ip_route_regex, readchomp(`ip r get $dest_ip`))
+        if match[:dest_ip] == dest_ip
+            iface = string(match[:iface])
+            gw = isnothing(match[:gw]) ? nothing : IPv4Addr(match[:gw])
+            src = IPv4Addr(match[:src_ip])
+            return iface, gw, src
+        end
+    end
+end
+get_ip_addr(dest_ip::IPv4Addr)::Tuple{String, Union{IPv4Addr, Nothing}, IPv4Addr} = get_ip_addr(string(dest_ip))
+
+const arping_regex = r"^Unicast reply from (?:\d{1,3}\.){3}\d{1,3} \[(?<mac>(?:[A-F\d]{2}:){5}[A-F\d]{2})\]"m
+
+"""
+Get the first hop mac address for the given target ip
+"""
+function first_hop_mac(target::String, iface::String)::NTuple{6, UInt8}
+    try
+        return mac_from_ip(target, :remote)
+    catch e
+        x = match(arping_regex, readchomp(`arping -c 1 $target`))
+        if !isnothing(x)
+            return mac(x[:mac])
+        end
+        @warn "Unable to find MAC address of $target using arping"
+    end
+    return nothing
+end
+first_hop_mac(target::IPv4Addr, iface::String)::NTuple{6, UInt8} = first_hop_mac(string(target), iface)
+
+"""
+Get the interface for the given ip
+"""
+function get_dev_from_ip(ip::String)::String
+    for match ∈ eachmatch(ip_address_regex, readchomp(`ip a`))
+        if match[:ip] == ip
+            return string(match[:iface])
+        end
+    end
+    error("Unable to find device for IP: $ip")
+end
+get_dev_from_ip(ip::IPv4Addr)::String = get_dev_from_ip(string(ip))
+
+"""
+Initialise an environment "context" for the given target
+"""
+function init_environment(target::Target, q::CircularChannel{Packet}, covertness::Int=5)::Dict{Symbol, Any}
+    @assert isa(target.ip, IPv4Addr)
+    @assert 1 ≤ covertness ≤ 10
+
+    env = Dict{Symbol, Any}()
+    # What is the "covertness" we are aiming to achieve?
+    env[:desired_secrecy] = covertness
+    # Get dest ip as UInt32
+    env[:dest_ip] = target.ip
+    # Get src ip from sending interface
+    iface, gw, src_ip = get_ip_addr(target.ip)
+    # Get sending interface + address
+    env[:interface] = length(ARGS) ≥ 2 ? ARGS[2] : iface # Override interface if specified in args
+    env[:src_ip] = src_ip
+    # Get mac address from sending interface
+    env[:src_mac] = mac_from_ip(env[:src_ip])
+    # Get first hop mac address
+    env[:dest_first_hop_mac] = isnothing(gw) ? first_hop_mac(env[:dest_ip], iface) : first_hop_mac(gw, iface)
+    # Target object
+    env[:target] = target
+    # Queue
+    env[:queue] = q
+    # Get socket
+    env[:sock] = get_socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW)
+    return env
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/outbound/packets.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+using AES
+
+# Encrypt a payload, using our PSK and IV
+enc(plaintext::Vector{UInt8})::Vector{UInt8} = encrypt(plaintext, AESCipher(;key_length=128, mode=AES.CBC, key=target.AES_PSK); iv=target.AES_IV).data
+
+# IP checksum
+function checksum(message::Vector{UInt8})::UInt16
+    checksum = sum([UInt32(message[i]) << 8 + UInt32(message[i+1]) for i in 1:2:length(message)])
+   checksum = ~((checksum & 0xffff) + (checksum >> 16)) & 0xffff
+end
+
+# TCP and UDP checksum
+function checksum(packet::Vector{UInt8}, tcp_header::Vector{UInt8}, payload::Vector{UInt8})::UInt16
+    header_length = length(tcp_header)
+    segment_length = header_length + length(payload)
+    buffer = zeros(UInt8, 12+segment_length)
+
+    buffer[1:4] = packet[27:30] # Source IP
+    buffer[5:8] = packet[31:34] # Destination IP
+    buffer[9] = UInt8(0) # Reserved 
+    buffer[10] = packet[24] # Protocol
+    
+    buffer[11:12] = to_bytes(UInt16(segment_length)) # TCP segment length
+
+    for i ∈ 1:length(tcp_header)
+        buffer[12+i] = tcp_header[i]
+    end
+
+    for i ∈ 1:length(payload)
+        buffer[12+header_length+i] = payload[i]
+    end     
+    return checksum(buffer)
+end
+
+#=
+
+    Layer 2: Data link
+
+=#
+
+function craft_datalink_header(t::Link_Type, nt::Network_Type, env::Dict{Symbol, Any}, kwargs::Dict{Symbol, Any})::Vector{UInt8}
+    if t == Ethernet::Link_Type
+        return craft_ethernet_header(nt, env; kwargs...)
+    else
+        error("Unsupported link type: $t")
+    end
+end
+
+function craft_ethernet_header(t::Network_Type, env::Dict{Symbol, Any}; source_mac::Union{NTuple{6, UInt8}, Nothing} = nothing, dest_mac::Union{NTuple{6, UInt8}, Nothing} = nothing)::Vector{UInt8}
+    header = Vector{UInt8}()
+    dest_mac = isnothing(dest_mac) ? env[:dest_first_hop_mac] : dest_mac
+    append!(header, dest_mac)
+    source_mac = isnothing(source_mac) ? env[:src_mac] : source_mac
+    append!(header, source_mac)
+    append!(header, to_net(UInt16(t)))
+    return header
+end
+
+#=
+
+    Layer 3: Network
+
+=#
+
+function craft_network_header(t::Network_Type, transport::Transport_Type, env::Dict{Symbol, Any}, kwargs::Dict{Symbol, Any})::Vector{UInt8}
+    if t == IPv4::Network_Type
+        return craft_ip_header(transport, env; kwargs...)
+    elseif t == ARP::Network_Type
+        return craft_arp_header(env; kwargs...)
+    else
+        error("Unsupported network type: $t")
+    end
+end
+
+function craft_arp_header(
+    env::Dict{Symbol, Any};
+    hardware_type::Union{Nothing, UInt16} = 0x0001,
+    protocol_type::Union{Nothing, UInt16} = 0x0800,
+    hardware_size::Union{Nothing, UInt8} = 0x06,
+    protocol_size::Union{Nothing, UInt8} = 0x04,
+    operation::Union{Nothing, UInt16} = 0x0001,
+    SHA::Union{Nothing, NTuple{6, UInt8}} = nothing,
+    SPS::Union{Nothing, NTuple{4, UInt8}} = nothing,
+    THA::Union{Nothing, NTuple{6, UInt8}} = (0, 0, 0, 0, 0, 0),
+    TPS::Union{Nothing, NTuple{4, UInt8}} = nothing
+    )::Vector{UInt8}
+    header = Vector{UInt8}()
+    append!(header, to_net(hardware_type))
+    append!(header, to_net(protocol_type))
+    append!(header, to_net(hardware_size))
+    append!(header, to_net(protocol_size))
+    append!(header, to_net(operation))
+    SHA = isnothing(SHA) ? env[:src_mac] : SHA
+    append!(header, SHA)
+    SPS = isnothing(SPS) ? env[:src_ip] : SPS
+    append!(header, SPS)
+    append!(header, THA)
+    TPS = isnothing(TPS) ? env[:dest_ip] : TPS
+    append!(header, TPS)
+    return header
+end
+
+function ip_checksum(header::Vector{UInt8})::UInt16
+    checksum = sum([UInt32(header[i]) << 8 + UInt32(header[i+1]) for i in 1:2:lastindex(header)])
+    return ~UInt16((checksum >> 16) + (checksum & 0xFFFF))
+end
+
+function craft_ip_header(
+            protocol::Transport_Type,
+            env::Dict{Symbol, Any};
+            version::Union{Nothing, UInt8} = nothing,
+            ihl::Union{Nothing, UInt8} = nothing,
+            dscp::Union{Nothing, UInt8} = nothing,
+            ecn::Union{Nothing, UInt8} = nothing,
+            total_length::Union{Nothing, UInt16} = nothing,
+            identification::Union{Nothing, UInt16} = nothing,
+            flags::Union{Nothing, UInt8} = nothing,
+            fragment_offset::Union{Nothing, UInt16} = nothing,
+            ttl::Union{Nothing, UInt8} = nothing,
+            header_checksum::Union{Nothing, UInt16} = nothing,
+            source_ip::Union{Nothing, UInt32} = nothing,
+            dest_ip::Union{Nothing, UInt32} = nothing
+        )::Vector{UInt8}
+    ip_header = Vector{UInt8}()
+    version = isnothing(version) ? 0x4 : version
+    ihl = isnothing(ihl) ? 0x5 : ihl
+    append!(ip_header, to_net(version << 4 | ihl & 0xf))
+    dscp = isnothing(dscp) ? 0x0 : dscp
+    ecn = isnothing(ecn) ? 0x0 : ecn
+    append!(ip_header, to_net(dscp << 2 | ecn & 0x3))
+    total_length = isnothing(total_length) ? 0x0000 : total_length
+    append!(ip_header, to_net(total_length))
+    identification = isnothing(identification) ? rand(UInt16) : identification
+    append!(ip_header, to_net(identification))
+    flags = isnothing(flags) ? 0b000 : flags & 0b111
+    fragment_offset = isnothing(fragment_offset) ? 0x0000 : fragment_offset & 0x1fff
+    append!(ip_header, to_net(flags << 13 | fragment_offset))
+    ttl = isnothing(ttl) ? 0xf3 : ttl
+    append!(ip_header, to_net(ttl))
+    append!(ip_header, to_net(UInt8(protocol)))
+    _checksum = isnothing(header_checksum) ? 0x0000 : header_checksum
+    append!(ip_header, to_net(_checksum))
+    source_ip = isnothing(source_ip) ? env[:src_ip].host : source_ip
+    append!(ip_header, to_net(to_bytes(source_ip)))
+    dest_ip = isnothing(dest_ip) ? env[:dest_ip].host : dest_ip
+    append!(ip_header, to_net(to_bytes(dest_ip)))
+    return ip_header
+end
+
+#=
+
+    Layer 4: Transport
+
+=#
+
+function craft_transport_header(t::Transport_Type, env::Dict{Symbol, Any}, packet::Vector{UInt8}, payload::Vector{UInt8}, kwargs::Dict{Symbol, Any})::Vector{UInt8}
+    if t == UDP::Transport_Type
+        return craft_udp_header(payload, env; kwargs...)
+    elseif t == TCP::Transport_Type
+        return craft_tcp_header(packet, payload, env; kwargs...)
+    else
+        error("Unsupported transport type: $t")
+    end
+end
+
+function craft_tcp_header(
+            packet::Vector{UInt8},
+            payload::Vector{UInt8},
+            ::Dict{Symbol, Any};
+            sport::Union{Nothing, UInt16} = nothing,
+            dport::Union{Nothing, UInt16} = nothing,
+            seq::Union{Nothing, UInt32} = nothing,
+            ack::Union{Nothing, UInt32} = nothing,
+            data_offset::Union{Nothing, UInt8} = nothing,
+            reserved::Union{Nothing, UInt8} = nothing,
+            flags::Union{Nothing, UInt16} = nothing,
+            window::Union{Nothing, UInt16} = nothing,
+            _checksum::Union{Nothing, UInt16} = nothing,
+            urgent_pointer::Union{Nothing, UInt16} = nothing,
+            options::Union{Nothing, Vector{UInt8}} = nothing
+        )::Vector{UInt8}
+    tcp_header = Vector{UInt8}()
+    sport = isnothing(sport) ? rand(UInt16) : sport
+    append!(tcp_header, to_net(sport))
+    dport = isnothing(dport) ? rand(UInt16) : dport
+    append!(tcp_header, to_net(dport))
+    seq = isnothing(seq) ? rand(UInt32) : seq
+    append!(tcp_header, to_net(seq))
+    # Observe flags and alter other fields accordingly (ack, urgent_pointer, etc.)
+    if isnothing(flags)
+        flags = 0x000
+    else
+        if flags & 0x10 != 0x0
+            ack = isnothing(ack) ? rand(UInt32) : ack
+        end
+        if flags & 0x20 != 0x0
+            urgent_pointer = isnothing(urgent_pointer) ? rand(UInt16) : urgent_pointer
+        end
+    end
+    ack = isnothing(ack) ? 0x00000000 : ack
+    append!(tcp_header, to_net(ack))
+    data_offset = isnothing(data_offset) ? 0x05 : data_offset
+    reserved = isnothing(reserved) ? 0x000 : reserved
+    do_flags = UInt16(data_offset) << 12 | UInt16(reserved) << 9 | UInt16(flags) & 0x01ff
+    append!(tcp_header, to_net(do_flags))
+    window = isnothing(window) ? 0xffff : window
+    append!(tcp_header, to_net(window))
+    check = isnothing(_checksum) ? 0x0000 : checksum
+    append!(tcp_header, to_net(check))
+    urgent_pointer = isnothing(urgent_pointer) ? 0x0000 : urgent_pointer
+    append!(tcp_header, to_net(urgent_pointer))
+    if !isnothing(options)
+        error("No options handling implemented")
+    end
+    if isnothing(_checksum)
+        tcp_header[17:18] = to_net(checksum(packet, tcp_header, payload))
+    end
+    return tcp_header
+end
+
+#=
+
+    Crafting the packets
+
+=#
+
+function craft_packet(;
+            payload::Vector{UInt8}, env::Dict{Symbol, Any},
+            network_type::Network_Type = IPv4::Network_Type,
+            transport_type::Transport_Type = TCP::Transport_Type,
+            EtherKWargs::Dict{Symbol, Any} = Dict{Symbol, Any}(),
+            NetworkKwargs::Dict{Symbol, Any} = Dict{Symbol, Any}(),
+            TransportKwargs::Dict{Symbol, Any} = Dict{Symbol, Any}()
+        )::Vector{UInt8}
+
+    packet = Vector{UInt8}()
+    #@debug "Crafting packet" p=payload ek=EtherKWargs nk=NetworkKwargs tk=TransportKwargs
+
+    # Craft Datalink header
+    dl_header = craft_datalink_header(Ethernet::Link_Type, network_type, env, EtherKWargs)
+    append!(packet, dl_header)
+    dl_length = length(packet)
+
+    # Get network header
+    network_header = craft_network_header(network_type, transport_type, env, NetworkKwargs)
+    append!(packet, network_header)
+
+
+    transport_header = craft_transport_header(transport_type, env, packet, payload, TransportKwargs)
+    if network_type == IPv4::Network_Type && packet[17:18] == [0x00, 0x00]
+        len = to_net(UInt16(length(network_header) + length(transport_header) + length(payload)))
+        packet[dl_length+3:dl_length+4] = len
+        # Perform checksum after setting length
+    end
+    if network_type == IPv4::Network_Type && packet[dl_length+11:dl_length+12] == [0x00, 0x00]
+        packet[dl_length+11:dl_length+12] = to_net(checksum(packet[dl_length+1:dl_length+length(network_header)]))
+    end
+    # Craft Transport header
+    append!(packet, transport_header)
+    
+    # Append payload
+    append!(packet, payload)
+
+    return packet
+end
+
+"""
+    ARP_Beacon(payload::NTuple{6, UInt8})
+
+Send out a beacon with the given payload. The payload is a tuple of 6 bytes.
+"""
+function ARP_Beacon(payload::UInt8, source_ip::IPv4Addr, send_socket::IOStream=get_socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW))::Nothing
+    src_mac = mac_from_ip(source_ip, :local) # This function is used by the receiver, so the src addr is the target addr
+    src_ip = _to_bytes(source_ip.host)
+    dst_ip = [src_ip[1:3]...; payload]
+    iface = get_dev_from_ip(source_ip)
+    @debug "Sending ARP beacon" encoded_byte=payload time()
+
+    packet = craft_packet(
+        payload = Vector{UInt8}(),
+        env = Dict{Symbol, Any}(),
+        network_type = ARP::Network_Type,
+        EtherKWargs = Dict{Symbol, Any}(
+            :source_mac => src_mac, # Get from regex...
+            :dest_mac => (0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+        ),
+        NetworkKwargs = Dict{Symbol, Any}(
+            :SHA => src_mac,
+            :THA => (0x00, 0x00, 0x00, 0x00, 0x00, 0x00),
+            :SPS => NTuple{4, UInt8}(src_ip), # Target <- Have from target...
+            :TPS => NTuple{4, UInt8}(dst_ip) # first 3 bytes of src_ip, + payload
+        )
+    )
+    # Send packet
+    x = sendto(send_socket, packet, iface)
+    @assert x == length(packet) "Sent $x bytes, expected $(length(packet))"
+    return nothing
+end
+ARP_Beacon(payload::NTuple{6, UInt8}, source_ip::String) = ARP_Beacon(payload, IPv4Addr(source_ip))
+
+
+function send_packet(packet::Vector{UInt8}, net_env::Dict{Symbol, Any})::Nothing
+    bytes = sendto(net_env[:sock]::IOStream, packet, net_env[:interface]::String)
+    @assert (bytes == length(packet)) "Sent $bytes bytes, expected $(length(packet))"
+    return nothing
+end
+
+# The below functions are just wrappers of send_packet (sendto) and their respective functions in covert_channels
+
+function send_packet(m::covert_method, net_env::Dict{Symbol, Any}, payload::String, template::Dict{Symbol, Any})::Nothing
+    return send_packet(craft_packet(;encode(m, payload; template)...), net_env)
+end
+
+function send_sentinel_packet(m::covert_method, net_env::Dict{Symbol, Any}, template::Dict{Symbol, Any})::Nothing
+    send_packet(craft_packet(;encode(m, craft_sentinel_payload(m.payload_size); template)...), net_env)
+end
+
+function send_recovery_packet(m::covert_method, last_verification::Tuple{Int64, UInt8}, known_host::UInt8, net_env::Dict{Symbol, Any}, template::Dict{Symbol, Any})::Nothing
+    send_packet(craft_packet(;encode(m, craft_recovery_payload(m.payload_size, last_verification, known_host); template)...), net_env)
+end
+
+function send_method_change_packet(m::covert_method, method_index::Int, offset::UInt8, net_env::Dict{Symbol, Any}, template::Dict{Symbol, Any})::Nothing
+    payload = craft_change_method_payload(method_index, offset, m.payload_size)
+    send_packet(craft_packet(;encode(m, payload; template)...), net_env)
+end
+
+function send_discard_chunk_packet(m::covert_method, bits::String, pointer::Int64, net_env::Dict{Symbol, Any}, template::Dict{Symbol, Any})::Int64
+    pointer_offset, payload = craft_discard_chunk_payload(m.payload_size, bits, pointer)
+    send_packet(craft_packet(;encode(m, payload; template)...), net_env)
+    return pointer_offset
+end
+
+"""
+    pad_transmission(payload::bitstring, method::Symbol=:short)::bitstring
+
+    Take the payload and pad it to the nearest byte boundary.
+
+    Methods are:
+        :short => Uses minimal padding, but is less covert
+        :covert => Uses more padding, but is more covert
+"""
+function pad_transmission(raw::String, method::Symbol=PADDING_METHOD)::String
+    if method == :short
+        return raw * "1"
+    elseif method == :covert
+        # We know our encrypted payload is a multiple of 128 bits, so divide by 128 to get the number of "segments"
+        return raw * lstrip(bitstring(Int64(length(raw) / 128)), '0')
+    else
+        error("Unknown padding method $method")
+    end
+end
+
+"""
+    pad_packet_payload(packet_payload::bitstring, capacity::Int, transmission::bitstring, method::Symbol=:short)::bitstring
+
+    Pad the packet payload to the size of the capacity, depending on the method.
+
+    Transmission is the orginal, unpadded, bits for transmission (post-encryption), used for verification.
+
+    Handles same methods as ['pad_transmission'](@ref)
+"""
+function pad_packet_payload(packet_payload::String, capacity::Int, transmission::String, method::Symbol=PADDING_METHOD)::String
+    if method == :short
+        padding = "0" ^ (capacity - length(packet_payload))
+        @assert remove_padding(pad_transmission(transmission) * padding, method) == transmission "Padding is not valid (:short)"
+        return packet_payload * padding
+    elseif method == :covert
+        padding = join([rand(['0', '1']) for _ in 1:capacity - length(packet_payload)])
+        # Random padding CANNOT be a valid length of the payload
+        #  it's very likely this will happen, but just in case...
+        while remove_padding(pad_transmission(transmission, method) * padding, method) != transmission
+            padding = join([rand(['0', '1']) for _ in 1:capacity - length(packet_payload)])
+        end
+        return packet_payload * padding
+    else
+        error("Unknown padding method $method")
+    end
+end
+
+"""
+Send a packet using an adaptive covert communication channel
+"""
+function send_covert_payload(raw_payload::Vector{UInt8}, methods::Vector{covert_method}, net_env::Dict{Symbol, Any})
+    # Blacklist our current host, as the target may arp us unrelated to the covert channel
+    host_blacklist = [UInt8(hton(net_env[:dest_ip].host) & 0x000000ff)]
+    
+    # Protocol blacklisting variables:
+    # Current packet + `penalty_size` : When it is no longer "blacklisted" (-1 for permenant blacklist)
+    penalty_size = 30
+    # Initialise protocol failure counter
+    protocol_failures = 0
+    # Number of failures until we switch to next method
+    max_failures = 2
+    # (Protocol, Release_packet)
+    protocol_blacklist = Vector{Tuple{Int64, Int64}}()
+
+    # Initialise sender variables:
+    # By default, we start with the first method
+    current_method_index = 1
+    # Get the method from the vector
+    method = methods[current_method_index]
+    # And initialise it
+    method_kwargs = init(method, net_env)
+    # Pointer to the current bit we are sending (start with the first)
+    pointer = 1
+    # Pointer to the start of the current chunk
+    chunk_pointer = pointer
+    # Max data packets between integrity checks
+    integrity_interval = 6
+    # Number of packets sent
+    packet_count = 0
+    # Time to wait for a (challenge) response from the target
+    check_timeout = 10
+    # The padding we send to the target with our final payload will be part of the integrity check, so store it
+    final_padding = ""
+    # When we have sent the final payload we go back to perform an integrity check, but we don't want to send packets after so we set this flag
+    finished = false
+    # Should verify at next oppurtunity?
+    should_verify = false
+
+    # Initialise the payload:
+    payload = enc(raw_payload)
+    # Convert the payload to a bitstring
+    _bits = *(bitstring.(payload)...)
+    # Pad the transmission, because we may have to append noise to it later (to fit a methods capacity)
+    bits = pad_transmission(_bits)
+    
+    # Give the environment queue some time to populate, so sleep a bit
+    #  If we don't do this then our chosen method will be volatile...  
+    time_interval = 10
+    @warn "Inital time interval " time_interval
+    sleep(time_interval)
+    
+    # Recovery mode variables:
+    # Whether we are in recovery mode
+    recovery_mode = false
+    # At 0 packets we know what the payload is (0x00)
+    last_verification_packet_count = packet_count
+    last_verification_time = time()
+    last_integrity = (0, 0x00) 
+    next_integrity = (0, 0x00)
+    # (length (in s), integrity value)
+    # Time interval, packet interval
+    #  to start, we don't want to go straight into recovery mode, but we do want the possibility - so just add a delay
+    #  50 seconds, 6 packets
+    recovery_timeouts = (50, integrity_interval)
+
+    @info "Sending sentinel packet" method=method.name
+    # Start communication with a sentinel packet
+    send_sentinel_packet(method, net_env, method_kwargs)
+    while pointer <= lastindex(bits)
+        # Remove blacklisted protocols that have served their penalty
+        for (idx, (proto, penal)) ∈ enumerate(protocol_blacklist)
+            # If the penalty has expired, remove it
+            if penal <= packet_count
+                @debug "Removing protocol from blacklist" protocol=methods[proto].name
+                deleteat!(protocol_blacklist, idx)
+            end
+        end
+
+        if recovery_mode
+            @info "Entering recovery mode" timeouts=recovery_timeouts
+            # Wait until the target is in recovery mode 1.5x what we think it should wait, to be sure
+            while !(time() - last_verification_time > recovery_timeouts[1] * 1.5 || packet_count - last_verification_packet_count > recovery_timeouts[2] * 1.5)
+                sleep(1)
+            end
+            # Get all the scores of the method, so we can restart communication with the best one
+            S, R = method_calculations(methods, net_env, [x[1] for x ∈ protocol_blacklist])
+            # Get permutation of scores that puts the indices in order of best to worst 
+            idxs = sortperm(S)
+            # Iterate through methods until we find one that works, it will respond and verify...
+            while !isempty(idxs)
+                i = pop!(idxs)
+                # Pop the next highest method, and sleep its inteval time
+                # We don't want to ignore covertness because we are in recovery...
+                sleep(R[i])
+                # get a known host for the integrity check
+                known_host = get_local_net_host(net_env[:queue], net_env[:src_ip], host_blacklist)
+
+                # Update the method, and initialise it
+                method = methods[i]
+                method_kwargs = init(method, net_env)
+
+                # Send recovery packet
+                send_recovery_packet(method, last_integrity, known_host, net_env, method_kwargs)
+                @debug "Attempting to recover with method" method=methods[i].name
+                
+                # Allow a larger timeout here, as the recovery process is a bit longer.
+                if await_arp_beacon(net_env[:dest_ip], known_host, check_timeout*4)
+                    # Success, we have recovered, so update the variables
+                    current_method_index = i
+                    pointer = last_integrity[1] + 1
+                    chunk_pointer = pointer
+                    recovery_timeouts = (time() - last_verification_time, packet_count - last_verification_packet_count)
+                    last_verification_time = time()
+                    last_verification_packet_count = packet_count
+                    should_verify = true
+                    sleep(R[current_method_index])
+                    break # Don't need to try any more methods
+                end
+            end
+            if last_verification_packet_count != packet_count && isempty(idxs) # If we exhausted all methods, end communication
+                error("Failed to recover with any method")
+            end
+            @info "Recovered with method" method=methods[current_method_index].name
+
+            # Iterate through methods until we find one that works, it will respond and verify...
+            recovery_mode = false
+        end
+
+        # Determine method to use, strip the penalties from the protocol blacklist, it doesn't need them
+        # Give it the current method to discourage it from switching (using a 10% bonus to the score)
+        if protocol_failures == 0
+            (method_index, time_interval) = determine_method(methods, net_env, [x[1] for x ∈ protocol_blacklist], current_method_index)
+        else
+            method_index = current_method_index
+        end
+        
+        # If we have changed method, or are due an integrity check
+        if method_index != current_method_index || packet_count % integrity_interval == 0 || should_verify
+
+            # This label is jumped to later (for our final integrity check)
+            @label verify
+
+            # Don't send back to back packets
+            sleep(time_interval)
+
+            # Get the current integrity, if we have used final padding, append it
+            integrity = integrity_check(bits[chunk_pointer:pointer-1] * final_padding)
+            # Get a known host for the integrity check
+            known_host = get_local_net_host(net_env[:queue], net_env[:src_ip], host_blacklist)
+            
+            # Send the challenge
+            send_method_change_packet(method, method_index, integrity ⊻ known_host, net_env, method_kwargs)
+            
+            # Switch methods
+            method = methods[method_index]
+
+            if method_index != current_method_index
+                @info "Switched method, performing integrity check" method=method.name interval=time_interval
+                protocol_failures = 0
+            end
+
+            method_kwargs = init(method, net_env)
+            current_method_index = method_index
+            if packet_count % integrity_interval == 0
+                @debug "Performing regular interval integrity check" interval=integrity_interval
+            elseif !should_verify
+                @debug "Final integrity check"
+            end
+
+            should_verify = false
+
+            # Await the response
+            if await_arp_beacon(net_env[:dest_ip], known_host, check_timeout) # Success
+                # reset failures
+                protocol_failures = 0
+                @debug "Integrity check passed" method=method.name integrity known_host integrity ⊻ known_host
+                # reset chunk pointer
+                chunk_pointer = pointer
+                # update last verified integrity (+ length)
+                last_integrity = next_integrity
+                next_integrity = (chunk_pointer-1, integrity)
+            else # Failure, resend chunk
+                @warn "Failed integrity check" method=method.name integrity known_host integrity ⊻ known_host
+                # Increment failures
+                protocol_failures += 1
+                # If we have failed too many times, blacklist the protocol
+                if protocol_failures == max_failures
+                    push!(protocol_blacklist, (method_index, packet_count + penalty_size))
+                    @info "Blacklisting protocol" protocol=method.name
+                    protocol_failures = 0
+                    # Enter recovery mode
+                    recovery_mode = true
+            	end
+                # Reset pointer to beginning of chunk
+                pointer = chunk_pointer
+                # Tell the target to discard the chunk, and send some data with it too
+                pointer += send_discard_chunk_packet(method, bits, pointer, net_env, method_kwargs)
+                # We aren't finished anymore (if we were before)
+                finished = false
+                final_padding = ""
+            end
+            # If we have finished, we can just exit here
+            if finished
+                break
+            end
+        end
+        # Send payload packet
+        if !finished && pointer+method.payload_size-1 > lastindex(bits)
+            # For last part of payload, we will need to pad the remaining capacity
+            payload = pad_packet_payload("0" * bits[pointer:lastindex(bits)], method.payload_size, _bits)
+            @debug "Packet covert payload (Without MP)(FINAL)" payload=bits[pointer:lastindex(bits)] chunk_length=pointer-chunk_pointer total_sent=pointer
+            payload_length = length(pointer:lastindex(bits))
+            pointer += payload_length - 1
+            # Save the final padding, so we can append it to the integrity check
+            final_padding = payload[payload_length+1:end]
+            # Set finished flag so we jump to verification stage
+            finished = true
+        elseif !finished
+            # For all other packets, we can just send the payload
+            payload = "0" * bits[pointer:pointer+method.payload_size-2]
+            @debug "Packet covert payload (Without MP)" payload=bits[pointer:pointer+method.payload_size-2] chunk_length=pointer-chunk_pointer total_sent=pointer
+            pointer += method.payload_size-1
+        end
+        # Send packet
+        send_packet(method, net_env, payload, method_kwargs)
+        # If that was the last packet, jump to verification stage
+        if finished
+            @debug "Payload sent, verifiying integrity"
+            # This takes us to the `@label verify` line
+            @goto verify
+        end
+        # Increment packet count
+        packet_count += 1
+        # Sleep for the time interval
+        sleep(time_interval)
+    end
+    # Send sentinel packet to end communication
+    send_sentinel_packet(method, net_env, method_kwargs)
+    @debug "Endded communication via SENTINEL" via=method.name
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/sender.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+
+include("main.jl")
+
+using ..CovertChannels: covert_methods
+using .Environment: init_queue
+using .Outbound: init_environment, send_covert_payload
+
+@debug "Creating queue"
+net_env = init_environment(target, init_queue())
+
+using Random
+alphabet = collect('A':'Z')
+rng = MersenneTwister(1234)
+covert_payload = UInt8.([alphabet[rand(rng, 1:26)] for i = 1:parse(Int64, ARGS[3])])
+
+@debug "Sending covert payload" payload=covert_payload
+
+send_covert_payload(covert_payload, covert_methods, net_env)
+
+@info "Finished sending covert payload"
+
+sleep(10)
+exit(0)
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/utils.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+using StaticArrays
+import Base: string
+using CRC
+
+# Convert Unsigned integer to vector of UInt8
+to_bytes(x::UInt8)::SVector{1, UInt8} = [x]
+to_bytes(x::UInt16)::SVector{2, UInt8} = reverse(unsafe_load(Ptr{SVector{2, UInt8}}(Base.unsafe_convert(Ptr{UInt16}, Ref(x)))))
+to_bytes(x::UInt32)::SVector{4, UInt8} = reverse(unsafe_load(Ptr{SVector{4, UInt8}}(Base.unsafe_convert(Ptr{UInt32}, Ref(x)))))
+to_bytes(x::UInt64)::SVector{8, UInt8} = reverse(unsafe_load(Ptr{SVector{8, UInt8}}(Base.unsafe_convert(Ptr{UInt64}, Ref(x)))))
+
+struct IPv4Addr
+    host::UInt32
+    function IPv4Addr(host::UInt32)
+        return new(host)
+    end
+end
+# For pretty printing
+string(ip::IPv4Addr)::String = join(Int64.(reverse(to_bytes(ip.host))), ".")
+
+IPv4Addr(host::Vector{UInt8})::IPv4Addr = IPv4Addr(unsafe_load(Ptr{UInt32}(Base.unsafe_convert(Ptr{Vector{UInt8}}, reverse(host)))))
+IPv4Addr(host::SVector{4, UInt8})::IPv4Addr = IPv4Addr(Vector{UInt8}(host))
+IPv4Addr(host::AbstractString)::IPv4Addr = IPv4Addr(SVector{4, UInt8}(reverse(parse.(UInt8, split(host, "."), base=10))))
+
+# Convert but keep byte order
+_to_bytes(x::UInt8)::SVector{1, UInt8} = [x]
+_to_bytes(x::UInt16)::SVector{2, UInt8} = unsafe_load(Ptr{SVector{2, UInt8}}(Base.unsafe_convert(Ptr{UInt16}, Ref(x))))
+_to_bytes(x::UInt32)::SVector{4, UInt8} = unsafe_load(Ptr{SVector{4, UInt8}}(Base.unsafe_convert(Ptr{UInt32}, Ref(x))))
+_to_bytes(x::UInt64)::SVector{8, UInt8} = unsafe_load(Ptr{SVector{8, UInt8}}(Base.unsafe_convert(Ptr{UInt64}, Ref(x))))
+
+# Convert to network byte order
+to_net(in::Unsigned)::Vector{UInt8} = _to_bytes(hton(in))
+to_net(in::IPv4Addr)::Vector{UInt8} = _to_bytes(hton(in.host))
+to_net(in::Vector{UInt8})::Vector{UInt8} = reverse(in)
+to_net(in::SVector{4, UInt8})::Vector{UInt8} = reverse(in)
+
+# Parse a mac string into a UInt8 tuple
+mac(s::AbstractString)::NTuple{6, UInt8} = tuple(map(x->parse(UInt8, x, base=16), split(String(s), ':'))...)
+
+
+@enum Transport_Type begin
+    TCP = 0x6
+    UDP = 0x11
+end
+
+@enum Network_Type begin
+    IPv4 = 0x0800
+    ARP  = 0x0806
+end
+
+@enum Link_Type begin
+    Ethernet
+end
+
+@enum Layer_type begin
+    physical = 1    # Ethernet (on the wire only)
+    link = 2        # Ethernet
+    network = 3     # IPv4
+    transport = 4   # TCP
+    application = 5 # HTTP
+end
+
+custom_crc8_poly(poly::UInt8) = CRC.spec(8, poly, poly, false, false, 0x00, 0xf4) # Mimic the CRC_8 spec, with a custom polynomial
+
+"""
+    integrity_check(chunk::bitstring)::UInt8
+
+CRC8 of the chunk, padded to 8 bits
+
+```markdown
+    Integrity: Known by both hosts
+    Known_host: Known by challenger
+    
+    offset = integrity ⊻ known_host
+
+    Challenger sends offset, responder returns `offset ⊻ integrity`
+```
+This implementation is CRC8 based, but just has to be deterministic.
+"""
+function integrity_check(chunk::String)::UInt8
+    padding = 8 - (length(chunk) % 8)
+    # Payload may not be byte aligned, so pad it
+    chunk *= padding == 8 ? "" : "0"^padding
+    return crc(CRC_8)([parse(UInt8, chunk[i:i+7], base=2) for i in 1:8:length(chunk)])
+end
+
+"""
+    remove_padding(payload::bitstring, method::Symbol=PADDING_METHOD)::bitstring
+
+    Removes the padding applied by [`pad_transmission`](@ref) from the payload.
+"""
+function remove_padding(payload::String, method::Symbol=PADDING_METHOD)::String
+    if method == :short
+        return rstrip(payload, '0')[1:end-1]
+    elseif method == :covert
+        for i = length(payload):-1:1
+            if i % 128 == 0
+                bitlen = lstrip(bitstring(Int64(i/128)), '0')
+                if length(payload) - i >= length(bitlen)
+                    if payload[i+1:i+length(bitlen)] == bitlen
+                        payload = payload[1:i]
+                        return payload
+                    end
+                end
+            end
+        end
+        error("Incorrect padding")
+    else
+        error("Padding method $method not supported")
+    end
+end
+
+# Regular expressions to parse these command's outputs
+const ip_address_regex = r"^(?<index>\d+): (?<iface>[\w\d]+)(?:@[\w\d]+)?: <(?<ifType>[A-Z,_]+)> mtu (?<mtu>\d+) [\w ]+ state (?<state>[A-Z]+) group default qlen (?<qlen>\d+)[\s ]+link\/ether (?<mac>(?:[a-f\d]{2}:){5}[a-f\d]{2}) brd (?<brd>[a-f\d:]{17}) [\w\- ]+[\s ]+inet (?<ip>(?:\d{1,3}.){3}\d{1,3})\/(?<subnet>\d+)"m
+const ip_route_regex = r"^(?<dest_ip>(?:\d{1,3}.){3}\d{1,3}) (?:via (?<gw>(?:\d{1,3}.){3}\d{1,3}) )?dev (?<iface>[\w\d]+) src (?<src_ip>(?:\d{1,3}.){3}\d{1,3})"m
+const ip_neigh_regex = r"^(?<ip>(?:\d{1,3}.){3}\d{1,3}) dev (?<iface>[\w\d]+) lladdr (?<mac>(?:[0-9a-f]{2}:){5}[0-9a-f]{2})"m
+const ip_from_dev_regex = r"inet (?<ip>(?:\d{1,3}\.){3}\d{1,3})\/(?<cidr>\d{1,2})"
+const mac_from_dev_regex = r"link\/(?<type>[a-z]+) (?<mac>[a-f\d:]{17})"
+
+# Get the interface for the given ip
+function get_ip_from_dev(dev::String)::String
+    output = readchomp(`ip a show dev $dev`)
+    return match(ip_from_dev_regex, output)[:ip]
+end
+        
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/environment/headers.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+import Base: -, ntoh
+
+#=
+
+    Headers.jl
+
+=#
+
+# C-Related constants
+const PCAP_ERRBUF_SIZE  = 256
+const ETHERTYPE_IP      = 0x0800
+const IPPROTO_TCP       = 0x06
+const IPPROTO_UDP       = 0x11
+const ETHERTYPE_ARP     = 0x0806
+
+const AF_PACKET         = Int32(17)     # Capture entire packet
+const ETH_P_ALL         = Int32(0x0300) # Capture all ethernet frames (Ingoing & Outgoing)
+const SOCK_RAW          = Int32(3)      # Raw socket (For listening)
+const IPPROTO_RAW       = Int32(255)    # Raw IP packet (For sending)
+const ETH_ALEN          = Cuchar(6) # Length of MAC address
+const ETH_P_IP          = 0x0800  # IP protocol
+const ARPHRD_ETHER      = Cushort(1) # Ethernet hardware format
+
+#=
+
+Generic types
+
+=#
+
+abstract type Header end
+
+# TODO: Don't have this as mutable, it is slower than a generic struct
+#        but not just making a new struct each time thats also slow...
+mutable struct Layer{T<:Header}
+    layer::Layer_type
+    header::T
+    payload::Union{Layer, Vector{UInt8}, Missing}
+end
+
+mutable struct Pcap end
+
+struct Timeval
+    seconds::Clong
+    ms::Clong
+end
+
+function -(t1::Timeval, t2::Timeval)::Float64
+    return (t1.seconds - t2.seconds) + ((t1.ms - t2.ms) / 1_000_000)
+end
+
+struct Capture_header
+    timestamp::Timeval
+    capture_length::Int32
+    length::Int32
+end
+
+#=
+
+    Protocol header definitions
+
+    _protocol are headers as defined in C,
+     they are processed into a more verbose version for convinience
+
+=#
+
+struct Ethernet_header <: Header
+    destination::NTuple{6, UInt8}
+    source::NTuple{6, UInt8}
+    protocol::UInt16
+    function Ethernet_header(p::Ptr{UInt8})::Ethernet_header
+        return unsafe_load(Ptr{Ethernet_header}(p))
+    end
+end
+
+getoffset(::Ethernet_header)::Int64         = sizeof(Ethernet_header)
+getprotocol(hdr::Ethernet_header)::UInt16   = ntoh(hdr.protocol)
+
+struct Packet
+    cap_header::Capture_header
+    payload::Layer{Ethernet_header}
+end
+
+struct ARP_header <: Header
+    hardware_type::UInt16
+    protocol_type::UInt16
+    hardware_length::UInt8
+    protocol_length::UInt8
+    opcode::UInt16
+    sender_mac::NTuple{6, UInt8}
+    sender_ip::NTuple{4, UInt8}
+    target_mac::NTuple{6, UInt8}
+    target_ip::NTuple{4, UInt8}
+    function ARP_header(p::Ptr{UInt8})::ARP_header
+        return unsafe_load(Ptr{ARP_header}(p))
+    end
+end
+
+getoffset(::ARP_header)::Int64 = sizeof(ARP_header)
+getprotocol(::ARP_header)::UInt8 = 0x0
+
+# First read base header, then we can deal with options etc.
+struct _IPv4_header
+    version_ihl::UInt8 # 4 -> version, 4 -> IHL
+    tos::UInt8 # Type of service + priority
+    tot_len::UInt16 # Total IPv4 length
+    id::UInt16 # identification
+    frag_off::UInt16 # Fragmented offset
+    ttl::UInt8
+    protocol::UInt8
+    check::UInt16 # Header checksum
+    saddr::UInt32
+    daddr::UInt32
+    function _IPv4_header(p::Ptr{UInt8})::_IPv4_header
+        return unsafe_load(Ptr{_IPv4_header}(p))
+    end
+end
+
+Base.ntoh(x::UInt8)::UInt8 = x
+byte_to_nibbles(x::UInt8)::NTuple{2, UInt8} = (x & 0x0f, (x & 0xf0) >> 4)
+
+struct IPv4_header <: Header
+    version::UInt8
+    ihl::UInt8
+    tos::UInt8
+    tot_len::UInt16
+    id::UInt16
+    frag_off::UInt16
+    ttl::UInt8
+    protocol::UInt8
+    check::UInt16
+    saddr::UInt32
+    daddr::UInt32
+    options::UInt32
+    function IPv4_header(p::Ptr{UInt8})::IPv4_header
+        _ip = _IPv4_header(p)
+        version, ihl = byte_to_nibbles(ntoh(_ip.version_ihl)) # Version + IHL
+        options_offset = p + sizeof(_IPv4_header)
+        options_size = ihl*4 - sizeof(_IPv4_header)
+        options = options_size > 0 ? Base.pointerref(options_offset, 1, options_size) : 0
+        return new(
+            ihl, version, # These two may be flipped depending on byte order
+            ntoh(_ip.tos), ntoh(_ip.tot_len), ntoh(_ip.id),
+            ntoh(_ip.frag_off), ntoh(_ip.ttl), ntoh(_ip.protocol),
+            ntoh(_ip.check), ntoh(_ip.saddr), ntoh(_ip.daddr),
+            ntoh(options)
+        )
+    end
+end    
+
+getoffset(hdr::IPv4_header)::Int64      = hdr.ihl * 4
+getprotocol(hdr::IPv4_header)::UInt8    = hdr.protocol
+
+struct _TCP_header
+    sport::UInt16
+    dport::UInt16
+    seq::UInt32
+    ack_num::UInt32
+    flags::UInt16
+    win_size::UInt16
+    check::UInt16
+    urg_ptr::UInt16
+    function _TCP_header(p::Ptr{UInt8})::_TCP_header
+        return unsafe_load(Ptr{_TCP_header}(p))
+    end
+end
+
+struct TCP_header <: Header
+    sport::UInt16
+    dport::UInt16
+    seq::UInt32
+    ack_num::UInt32
+    hdr_len::UInt8
+    reserved::UInt8
+    urg::Bool
+    ack::Bool
+    psh::Bool
+    rst::Bool
+    syn::Bool
+    fin::Bool
+    win_size::UInt16
+    check::UInt16
+    urg_ptr::UInt16
+    #options::NTuple{10, UInt32}
+    function TCP_header(p::Ptr{UInt8})::TCP_header
+        _tcp = _TCP_header(p)
+        flags = ntoh(_tcp.flags)
+        header_length   =  (flags & 0b1111000000000000) >> 12
+        reserved   = UInt8((flags & 0b0000111111000000) >> 6)
+        urg             = ((flags & 0b0000000000100000) >> 5) == 0x1
+        ack             = ((flags & 0b0000000000010000) >> 4) == 0x1
+        psh             = ((flags & 0b0000000000001000) >> 3) == 0x1
+        rst             = ((flags & 0b0000000000000100) >> 2) == 0x1
+        syn             = ((flags & 0b0000000000000010) >> 1) == 0x1
+        fin             = ((flags & 0b0000000000000001)     ) == 0x1
+        #options_offset = p + sizeof(_TCP_header)
+        #options_size = header_length*4 - sizeof(_TCP_header)
+        #options = options_size > 0 ? Base.pointerref(options_offset, 1, options_size) : zeros(UInt32, 10)
+        # Go from network byte order to host byte order (excluding flags as we already changed them)
+        return new(
+            ntoh(_tcp.sport), ntoh(_tcp.dport), ntoh(_tcp.seq), ntoh(_tcp.ack_num),
+            header_length, reserved, urg, ack, psh, rst, syn, fin, 
+            ntoh(_tcp.win_size), ntoh(_tcp.check), ntoh(_tcp.urg_ptr)#, options
+        )
+    end
+end
+
+getoffset(hdr::TCP_header)::Int64           = hdr.hdr_len * 4
+getprotocol(lyr::Layer{TCP_header})::UInt64 = lyr.payload[1:min(end, 4)] # No protocol field...
+
+struct UDP_header <: Header
+    sport::UInt16
+    dport::UInt16
+    len::UInt16
+    check::UInt16
+    function UDP_header(p::Ptr{UInt8})::UDP_header
+        return unsafe_load(Ptr{UDP_header}(p))
+    end
+end
+
+getoffset(::UDP_header)::Int64                  = sizeof(UDP_header)
+getprotocol(lyr::Layer{UDP_header})::Unsigned   = lyr.payload[1:min(length(lyr.payload), 4)]
+
+# Default layer -> header call
+getoffset(lyr::Layer{<:Header})::Int64          = getoffset(lyr.header)
+getprotocol(lyr::Layer{<:Header})::Unsigned     = getprotocol(lyr.header)
+
+#=
+
+    Header tree
+
+=#
+
+struct Node
+    type::Type{<:Header}
+    id::Unsigned
+    children::Vector{Node}
+end
+
+# Transport - 4
+
+HEADER_UDP = Node(
+    UDP_header,
+    IPPROTO_UDP,
+    []
+)
+
+HEADER_TCP = Node(
+    TCP_header,
+    IPPROTO_TCP,
+    []
+)
+
+# Network - 3
+
+HEADER_IPv4 = Node(
+    IPv4_header,
+    ETHERTYPE_IP,
+    [HEADER_TCP, HEADER_UDP]
+)
+
+HEADER_ARP = Node(
+    ARP_header,
+    ETHERTYPE_ARP,
+    []
+)
+
+# Link - 2
+
+HEADER_Ethernet = Node(
+    Ethernet_header,
+    0x00,
+    [HEADER_IPv4, HEADER_ARP]
+)
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/environment/queue.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+#=
+
+    queue.jl
+
+=#
+
+"""
+    errbuff_to_error(errbuf::Vector{UInt8})
+
+Raise error with null terminated string, often returned by libpcap
+"""
+function errbuff_to_error(errbuf::Vector{UInt8})
+    # Raise error with null terminated string
+    error(String(errbuf[1:findfirst(==(0), errbuf) - 1]))
+end 
+
+"""
+    pcap_lookupdev()::String
+
+Get the default device
+!!! Is a deprecated function, but is the simplest way to get the device
+"""
+function pcap_lookupdev()::String
+    # Error is returned into errbuff
+    errbuff = Vector{UInt8}(undef, PCAP_ERRBUF_SIZE)
+    # Get device
+    device = ccall(
+        (:pcap_lookupdev, "libpcap"),
+        Cstring,
+        (Ptr{UInt8},),
+        errbuff
+    )
+    if device == C_NULL
+        errbuff_to_error(errbuff)
+    end
+    dev = unsafe_string(device)
+    @debug "pcap_lookupdev() returned '$dev'"
+    return dev
+end
+
+function get_dev()::String
+    if length(ARGS) ≥ 2  
+        @debug "Using device from command line" dev=ARGS[2]
+        return ARGS[2]
+    else
+        return pcap_lookupdev()
+    end
+end
+
+"""
+    pcap_open_live(device::String, snapshot_len::Int64, promisc::Bool)::Ptr{Pcap}
+
+Open a live pcap session, returning a handle to the session
+"""
+function pcap_open_live(device::String, snapshot_len::Int64, promisc::Bool)::Ptr{Pcap}
+    # Error is returned into errbuff
+    errbuff = Vector{UInt8}(undef, PCAP_ERRBUF_SIZE)
+    # 1 is promisc, 0 isn't - so convert from Bool
+    promisc = Int64(promisc)
+    to_ms = 1000
+    handle = ccall(
+        (:pcap_open_live, "libpcap"),
+        Ptr{Pcap},
+        (Cstring, Int32, Int32, Int32, Ptr{UInt8}),
+        device, snapshot_len, promisc, to_ms, errbuff
+    )
+    if handle == C_NULL
+        errbuff_to_error(errbuff)
+    end
+    return handle
+end
+
+"""
+    pcap_loop(p::Ptr{Pcap}, cnt::Int64, callback::Function, user::Union{Ptr{Nothing}, Ptr{UInt8}})
+
+Loop through packets, calling callback on each packet
+"""
+function pcap_loop(p::Ptr{Pcap}, cnt::Int64, callback::Function, user::Union{Ptr{Nothing}, Ptr{UInt8}})::Nothing
+    !hasmethod(callback, Tuple{Ptr{UInt8}, Ptr{Capture_header}, Ptr{UInt8}}) ? error("Invalid callback parameters") :
+    cfunc = @cfunction($callback, Cvoid, (Ptr{UInt8}, Ptr{Capture_header}, Ptr{UInt8}))
+    ccall(
+        (:pcap_loop, "libpcap"),
+        Int32,
+        (Ptr{Pcap}, Int32, Ptr{Cvoid}, Ptr{Cuchar}),
+        p, cnt, cfunc, user
+    )
+end
+
+"""
+    pcap_breakloop(pcap::Ptr{Pcap})::Nothing
+
+Break out of pcap_loop
+"""
+function pcap_breakloop(pcap::Ptr{Pcap})::Nothing
+    ccall((:pcap_breakloop, "libpcap"), Cvoid, (Ptr{Pcap},), pcap)
+end
+
+"""
+    packet_from_pointer(p::Ptr{UInt8}, packet_size::Int32)::Layer{Ethernet_header}
+
+Convert a pointer to a packet into a Layer{Ethernet_header} object, with all headers and payload
+"""
+function packet_from_pointer(p::Ptr{UInt8}, packet_size::Int32)::Layer{Ethernet_header}
+    layer_index = 2
+    offset = 0
+    # Push layers here as we make them, then we can walk backwards and craft a full payload
+    layers::Vector{Layer{<:Header}} = [Layer(Layer_type(layer_index), Ethernet_header(p), missing)]
+    # Start at the lowest layer (Ethernet)
+    node = HEADER_Ethernet
+    # Don't exceed layer 3 (we +1 to make it 4, Transport, and we don't have any application layer protocols defined)
+    # Would be an improvement to work this out by finding the depth of our HEADER_Ethernet tree...
+    while layer_index ≤ 3
+        prev_layer = layers[end]::Layer{<:Header}
+        offset += getoffset(prev_layer)
+        proto = getprotocol(prev_layer)
+        # println("Packet context:", prev_layer, "\noffset:", offset, "\nproto:", proto)
+        for child ∈ node.children
+            if child.id == proto
+                # println("Added child:", child)
+                layer_index += 1
+                node = child
+                push!(layers, Layer(Layer_type(layer_index), child.type(p+offset), missing))
+                # There is only 1 header per layer, so skip the search
+                break
+            end
+        end
+        if prev_layer.layer == Layer_type(layer_index)
+            # End of tree
+            break
+        end
+    end
+    l = layers[end]::Layer{<:Header}
+    offset += getoffset(l)
+
+    # If there is a payload, read it into a vector
+    payload_size = packet_size - offset
+    if payload_size > 0
+        payload = zeros(UInt8, payload_size)
+        for i=1:payload_size
+            payload[i] = Base.pointerref(p+offset+i, 1, 1)
+        end
+    else
+        payload = Vector{UInt8}()
+    end
+
+    # Set the payload to the payload of the lowest layer
+    l.payload = payload
+    # Decrement layer index to walk backwards
+    layer_index -= 1
+    # Walk backwards through the layers, setting the payload of each layer to the layer above it, stopping at the link-layer (ETHERNET)
+    while layer_index ≥ 2
+        layer_index -= 1
+        packet = layers[layer_index]::Layer{<:Header}
+        packet.payload = l
+        l = packet
+    end
+    # Return the lowest layer (ETHERNET)
+    return l
+end
+
+"""
+    get_callback(queue::CircularChannel{Packet})::Function
+
+Get a callback function for pcap_loop, which will push packets to the queue
+"""
+function get_callback(queue)::Function
+    function callback(::Ptr{UInt8}, header::Ptr{Capture_header}, packet::Ptr{UInt8})::Cvoid
+        cap_hdr = unsafe_load(header)
+        pkt = Packet(cap_hdr, packet_from_pointer(packet, cap_hdr.capture_length))
+        put!(queue, pkt)
+        return nothing
+    end
+    return callback
+end 
+
+"""
+Get the local IP address of a device, if one is not given, assume default device
+"""
+function get_local_ip(device::String)::String
+    match = get_ip_from_dev(device)
+    if isnothing(match)
+        error("Could not find IP address for device: ", device)
+    end
+    return match
+end
+get_local_ip() = get_local_ip(get_dev())
+
+"""
+    init_queue(device::String, bpf_filter_string::String="")::CircularChannel{Packet}
+
+Given the device to open the queue on, return a CircularChannel{Packet} which will be filled with packets
+"""
+function init_queue(device::String=get_dev(); bpf_filter_string::String="")::CircularChannel{Packet}
+    queue = CircularChannel{Packet}(ENVIRONMENT_QUEUE_SIZE)
+    handle = pcap_open_live(device, -1, true)
+    # Set the filter if one is supplied
+    if bpf_filter_string != ""
+        program = Ref{bpf_prog}()
+        pcap_compile(handle, program, bpf_filter_string, Int32(1), UInt32(0))
+        # Add filter to pcap handle
+        pcap_setfilter(handle, program)
+        pcap_freecode(program)
+    end
+    close_pcap() = pcap_breakloop(handle)
+    # Add a hook to close the pcap on exit, so the program exits cleanly
+    atexit(close_pcap)
+    # Create a fuction with the queue bound to it, so we don't have to deal with passing it every time
+    callback = get_callback(queue)
+    @debug "Creating pcap sniffer" device=device
+    # Run the listener in a seperate thread
+    #  we use errormonitor here so errors on this thread are sent to main thread
+    errormonitor(Base.Threads.@spawn pcap_loop(handle, -1, callback, C_NULL))
+    return queue
+end
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/environment/query.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+#=
+
+    Query.jl
+
+    Functions related to extracting information from the environment queue:
+        - Custom querying
+        - Extracting headers
+        - Environment statistics
+        - get_tcp_server
+
+=#
+
+# Common tcp services (80, 443, etc.)
+const TCP_SERVICES = [UInt16(80), UInt16(443), UInt16(20), UInt16(21), UInt16(22), UInt16(25), UInt16(143)]
+
+"""
+    get_headers(p::Packet)::Vector{Header}
+
+Seperate the headers from a packet into a vector and return it
+"""
+function get_headers(p::Packet)::Vector{Header}
+    headers = Vector{Header}()
+    layer = p.payload
+    while true
+        push!(headers, layer.header)
+        layer = layer.payload
+        if !isa(layer, Layer)
+            return headers
+        end
+    end
+end
+
+"""
+    get_header(p::Packet, l::Layer_type)::Union{Header, Missing}
+
+Get the header of a specific layer from a packet
+"""
+function get_header(p::Packet, l::Layer_type)::Union{Header, Missing}
+    headers = get_headers(p)
+    for i=1:lastindex(headers)
+        if Layer_type(i+1) == l
+            return headers[i]
+        end
+    end
+    return missing
+end
+
+"""
+    get_queue_data(q::CircularChannel{Packet})::Vector{Packet}
+
+Converts the queue to a static vector of packets (Implicitly)
+"""
+get_queue_data(q::CircularChannel{Packet})::Vector{Packet} = q
+
+"""
+    get_layer_stats(packets, layer)::Dict{String, Int64}
+
+Get the statistics of a layer in the queue
+
+```
+Returns a dictionary with the following format:
+    - Key: The name of the header
+    - Value: The number of packets with that header
+```
+
+"""
+function get_layer_stats(v::Vector{Packet}, l::Layer_type)::Dict{String, Int64}
+    packet_headers = [get_header(p, l) for p ∈ v]
+    info = Dict{String, Int64}()
+    info["Missing"] = 0
+    for h ∈ packet_headers
+        if ismissing(h)
+            info["Missing"] += 1
+        else
+            prot = split(string(typeof(h)), ".")[end]
+            if prot ∈ keys(info)
+                info[prot] += 1
+            else
+                info[prot] = 1
+            end
+        end
+    end
+    if info["Missing"] == 0
+        delete!(info, "Missing")
+    end
+    return info
+end
+
+"""
+    get_layer_stats(q::CircularChannel{Packet}, l::Layer_type)::Dict{String, Int64}
+
+Converts the queue to a static vector of packets pre-processing
+"""
+get_layer_stats(q::CircularChannel{Packet}, l::Layer_type)::Dict{String, Int64} = get_layer_stats(get_queue_data(q), l)
+
+"""
+    get_layer2index(tree_root::Node)::Dict{String, Int64}
+
+Create a dictionary that maps the layer name to its index in the tree, using the packet tree defined in `headers.jl`
+"""
+function get_layer2index(tree_root::Node)::Dict{String, Int64}
+    layer2index = Dict{String, Int64}()
+    current_layer_nodes = Vector{Node}([tree_root])
+    next_layer_nodes = Vector{Node}()
+    current_layer = 1
+    while length(current_layer_nodes) > 0
+        for node ∈ current_layer_nodes
+            layer2index[split(string(node.type), ".")[end]] = current_layer
+            for child ∈ node.children
+                push!(next_layer_nodes, child)
+            end
+        end
+        current_layer_nodes = next_layer_nodes
+        next_layer_nodes = Vector{Node}()
+        current_layer += 1
+    end
+    return layer2index
+end
+
+layer2index = get_layer2index(HEADER_Ethernet)
+
+"""
+Returns true if the arguments match the header
+
+# Example
+```markdown
+In a packet with the following headers:
+    - TCP Packet with source port 80
+
+The following query will return true:
+    - `query_header(header, Dict(:sport => 80))`
+```
+
+"""
+function query_header(header::Header, arguments::Dict{Symbol, Any})::Bool
+    # Returns true if the header matches the arguments
+    if isempty(arguments)
+        return true
+    end
+    o = Vector{Bool}()
+    for (k, v) ∈ arguments
+        data = getfield(header, k)
+        if typeof(v) == Vector{typeof(data)}
+            push!(o, data ∈ v)
+        else
+            push!(o, data == v)
+        end
+    end
+    return all(o)
+end
+query_header(::Header, ::Nothing)::Bool = true
+query_header(::Nothing, ::Dict{Symbol, Any})::Bool = false
+
+
+"""
+    query_headers(headers, arguments)::Bool
+
+Returns true if arguments match the their respective headers
+
+# Example
+```markdown
+Packet with the following headers:
+    - Ethernet Packet with source MAC 00:00:00:00:00:00
+    - TCP Packet with source port 80
+
+The following query will return true:
+    - `query_headers(headers, Dict(
+        "Ethernet_header" => Dict(:smac => 0x000000000000),
+        "TCP_header" => Dict(:sport => 80)
+        ))`
+```
+"""
+function query_headers(headers::Vector{Header}, arguments::Dict{String, Dict{Symbol, Any}})::Bool
+    # Returns true if the headers match the arguments
+    o = Vector{Bool}()
+    for (k, v) ∈ arguments
+        header = get(headers, layer2index[k], nothing)
+        if !isnothing(header) && split(string(typeof(header)), ".")[end] == k
+            push!(o, query_header(header, v))
+        else
+            push!(o, false)
+        end
+    end
+    return all(o)
+end
+
+"""
+    query_queue(queue, arguments)::Vector{Vector{Header}}
+
+Returns a vector of all packet headers if a packet matches an argument
+
+Arguments is a vector of dictionaries, each dictionary is a match case
+A match case is a dictionary of header types and required values in that header
+
+# Example
+```julia
+arguments = [
+    {
+        TCP_header => {
+            :sport => 0x2f11 # 12049
+            :dport => 0x0050 # 80
+        }
+    },
+    {
+        IPv4_header => {
+            :ihl => [0x05, 0x06]
+        }
+    }
+]
+```
+!!! note
+    will return all headers for packets that either have:
+    (tcp header with a source port of `12049` *AND* destination port of `80`) *OR*
+    (ipv4 header with an ihl of `5` *OR* `6`)
+
+"""
+function query_queue(q::Vector{Packet}, arguments::Vector{Dict{String, Dict{Symbol, Any}}})::Vector{Vector{Header}}
+    query = Vector{Vector{Header}}()
+    for p ∈ q
+        headers = get_headers(p)
+        if any([query_headers(headers, case) for case ∈ arguments])
+            push!(query, headers)
+        end
+    end
+    return query
+end
+query_queue(q::CircularChannel{Packet}, args::Vector{Dict{String, Dict{Symbol, Any}}})::Vector{Vector{Header}} = query_queue(get_queue_data(q), args)
+
+"""
+    get_tcp_server(queue)::(MAC, IP, Port)
+
+Returns the MAC address, IP address, and port of the most recently active TCP server, using common TCP service ports and SYN packets
+Returns nothing if no server can be found
+"""
+function get_tcp_server(q::Vector{Packet})::Union{Tuple{NTuple{6, UInt8}, UInt32, UInt16}, NTuple{3, Nothing}}
+    common_query = Vector{Dict{String, Dict{Symbol, Any}}}([
+        Dict{String, Dict{Symbol, Any}}(
+            "TCP_header" => Dict{Symbol, Any}(
+                :dport => TCP_SERVICES
+            )
+        )
+    ])
+    # Clients connected to common TCP Services, TCP traffic to them is favourable (In terms of covertness)
+    services = query_queue(q, common_query)
+    
+    syn_query = Vector{Dict{String, Dict{Symbol, Any}}}([
+        Dict{String, Dict{Symbol, Any}}(
+            "TCP_header" => Dict{Symbol, Any}(
+                :syn => true
+            )
+        )
+    ])
+
+    service_mac, service_ip, service_port = nothing, nothing, nothing
+    if !isempty(services)
+        # Take the most recently active one
+        service = pop!(services)
+        # This is a packet going toward tcp service
+        service_mac = getfield(service[layer2index["Ethernet_header"]], :source)
+        # Ethernet_header -> tcp server mac (of next hop from local perspective)
+        service_ip = getfield(service[layer2index["IPv4_header"]], :daddr)
+        # IP_header.daddr -> tcp server ip
+        service_port = getfield(service[layer2index["TCP_header"]], :dport)
+        # TCP_header.dport -> tcp server port
+    else
+        syn_traffic = query_queue(q, syn_query)
+        if !isempty(syn_traffic)
+            # Take most recently active one
+            service = pop!(syn_traffic)
+            # Again, a packet going toward a tcp server
+            service_mac = getfield(service[layer2index["Ethernet_header"]], :source)
+            # Ethernet_header -> tcp server mac (of next hop from local perspective)
+            service_ip = getfield(service[layer2index["IPv4_header"]], :daddr)
+            # IP_header.daddr -> tcp server ip
+            service_port = getfield(service[layer2index["TCP_header"]], :dport)
+            # TCP_header.dport -> tcp server port
+        end
+    end
+    # Currently, the test environment does not support getting a valid tcp server like this (to be fixed...)
+    @debug "Found TCP Server, but using hardcoded (due to test environment)" service_ip service_mac service_port
+    ip = 0xc91e140a # 10.20.30.201
+    mac_raw = match(r"^Unicast reply from (?:\d{1,3}\.){3}\d{1,3} \[(?<mac>(?:[A-F\d]{2}:){5}[A-F\d]{2})\]"m, readchomp(`arping -c 1 10.20.30.201`))[:mac]
+    mac = tuple(map(x->parse(UInt8, x, base=16), split(String(mac_raw), ':'))...)
+    #mac = (0xfa, 0x4c, 0x92, 0x7f, 0x95, 0x3b)
+    port = 0x0050
+    return (mac, ip, port)
+end
+get_tcp_server(q::CircularChannel{Packet})::Union{Tuple{NTuple{6, UInt8}, UInt32, UInt16}, NTuple{3, Nothing}} = get_tcp_server(get_queue_data(q))
+
+get_local_host_count(q::CircularChannel{Packet}, local_address::IPv4Addr, subnet_mask::Int=24)::Int64 = get_local_host_count(get_queue_data(q), local_address, subnet_mask)
+function get_local_host_count(q::Vector{Packet}, local_address::IPv4Addr, subnet_mask::Int=24)::Int64
+    # CIDR notation is number of bits that denote the network, the rest are host bits
+    local_address_mask = typemax(UInt32) << (32 - subnet_mask)
+    # We want hosts on the same subnet so ignore the host bits
+    local_address = local_address_mask & hton(local_address.host)
+    # Get all IPv4 headers
+    ipv4_headers = [h[2] for h ∈ query_queue(q, [
+        Dict{String, Dict{Symbol, Any}}(
+            "IPv4_header" => Dict{Symbol, Any}()
+        )
+    ])]
+    hosts = Set{UInt32}()
+    for h ∈ ipv4_headers
+        for addr ∈ (h.saddr, h.daddr)
+            if (addr & local_address_mask) == local_address
+                push!(hosts, addr)
+            end
+        end
+    end
+    return length(hosts)
+end
+
+"""
+    get_local_host(queue, local_address, subnet_mask)::Vector{UInt8}
+
+    Returns the host byte of the local ip address
+"""
+function get_local_net_host(q::Vector{Packet}, local_address::IPv4Addr, blacklist::Vector{UInt8}=[], subnet_mask::Int=24)::UInt8 # return the host byte of the local ip
+    # Do not use .0 or .255 (network and broadcast addresses)
+    # Sometimes they will not be, but this is a simpler and "good enough" solution
+    push!(blacklist, 0x00, 0xff)
+    # Get all IPv4 headers
+    ipv4_headers = [h[2] for h ∈ query_queue(q, [
+        Dict{String, Dict{Symbol, Any}}(
+            "IPv4_header" => Dict{Symbol, Any}()
+        )
+    ])]
+    # CIDR notation is number of bits that denote the network, the rest are host bits
+    local_address_mask = typemax(UInt32) << (32 - subnet_mask)
+    # We want hosts on the same subnet so ignore the host bits
+    local_address = local_address_mask & hton(local_address.host)
+    hosts = Dict{UInt8, Int}()
+    for ipv4 ∈ ipv4_headers
+        for header ∈ (ipv4.saddr, ipv4.daddr)
+            if header & local_address_mask == local_address
+                # Invert the subnet mask to make it a host mask
+                host_byte = UInt8(header & ~local_address_mask)
+                if haskey(hosts, host_byte)
+                    # Increment the number of times we have seen this host byte
+                    hosts[host_byte] += 1
+                else
+                    hosts[host_byte] = 1
+                end
+            end
+        end
+    end
+    # Remove blacklisted host bytes from our list
+    for b ∈ blacklist
+        delete!(hosts, b)
+    end
+    # Return the most active local host
+    return collect(keys(hosts))[findmax(collect(values(hosts)))[2]]
+end
+get_local_net_host(q::CircularChannel{Packet}, local_address::IPv4Addr, blacklist::Vector{UInt8}=[], subnet_mask::Int=24)::UInt8 = get_local_net_host(get_queue_data(q), local_address, blacklist, subnet_mask)
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/environment/env\_utils.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+"""
+    get_socket(domain, type, protocol)::IOStream
+Return a raw socket, wrapped into an `IOStream`
+"""
+function get_socket(domain::Cint, type::Cint, protocol::Cint)::IOStream
+    fd = ccall(:socket, Cint, (Cint, Cint, Cint), domain, type, protocol)
+    if fd == -1
+        @error "Failed to open socket" errno=Base.Libc.errno()
+    end
+    return fdio(fd)
+end
+
+"""
+Link-layer socket address structure
+    required for sending packets at the link-layer
+    indicates the interface to send the packet to.
+"""
+struct Sockaddr_ll
+    sll_family::Cushort
+    sll_protocol::Cushort
+    sll_ifindex::Cint
+    sll_hatype::Cushort
+    sll_pkttype::Cuchar
+    sll_halen::Cuchar
+    sll_addr::NTuple{6, Cuchar}
+    function Sockaddr_ll(;
+        sll_family::Cushort=hton(UInt16(AF_PACKET)),
+        sll_protocol::Cushort=hton(ETH_P_IP),
+        sll_ifindex::Cint,
+        sll_hatype::Cushort=hton(ARPHRD_ETHER),
+        sll_pkttype::Cuchar=Cuchar(0),
+        sll_halen::Cuchar=ETH_ALEN,
+        sll_addr::NTuple{6, Cuchar}
+    )
+        new(sll_family, sll_protocol, sll_ifindex, sll_hatype, sll_pkttype, sll_halen, sll_addr)
+    end
+end
+
+"""
+    sendto(sockfd, packet, interface_id)::Cint
+
+Send a packet to the interface with the given id.
+"""
+sendto(sock::IOStream, packet::Vector{UInt8}, interface_name::Union{String, Cint})::Cint = sendto(fd(sock), packet, interface_name)
+sendto(sockfd::Integer, packet::Vector{UInt8}, interface_name::String)::Cint = sendto(sockfd, packet, if_nametoindex(interface_name))
+function sendto(sockfd::Integer, packet::Vector{UInt8}, interface_id::Integer)::Cint
+    sockfd = sockfd == Cint(sockfd) ? Cint(sockfd) : error("sockfd size is unsupported")
+    interface_id = interface_id == Cint(interface_id) ? Cint(interface_id) : error("interface_id size is unsupported")
+    # Dest addr in packet at know offset
+    destination_addr = NTuple{6, Cuchar}(packet[7:12])
+    # Create sockaddr_ll
+    sockaddr_ll = Sockaddr_ll(sll_ifindex=interface_id, sll_addr=destination_addr)
+    # Send packet
+    bytes = ccall(:sendto, Cint, (Cint, Ptr{UInt8}, Csize_t, Cint, Ptr{Sockaddr_ll}, Cint), sockfd, packet, length(packet), 0, Ref(sockaddr_ll), sizeof(sockaddr_ll))
+    if bytes == -1
+        @error "Failed to send packet" errno=Base.Libc.errno()
+    end
+    return bytes
+end
+
+"""
+Get the interface index for the given interface name.
+see also: [`if_indextoname`](@ref)
+"""
+function if_nametoindex(name::String)::Cuint
+    ifface_idx = ccall(:if_nametoindex, Cuint, (Cstring,), name)
+    if ifface_idx == 0
+        @error "Failed to get interface index" errno=Base.Libc.errno()
+    end
+    @assert if_indextoname(ifface_idx) != name "Mismatch in interface id and name, got '$(if_indextoname(ifface_idx))' instead of '$name' ($ifface_idx)"
+    return ifface_idx
+end
+
+"""
+Get the interface name for the given interface index.
+see also: [`if_nametoindex`](@ref)
+"""
+function if_indextoname(index::Cuint)::String
+    name = Vector{UInt8}(undef, 16)
+    ret = ccall(:if_indextoname, Ptr{UInt8}, (Cuint, Ptr{UInt8}), index, name)
+    if ret == C_NULL
+        @error "Failed to get interface name" errno=Base.Libc.errno()
+    end
+    return String(name)
+end
+
+# Sequence of bytes for an ARP packet, starting from ethertype ending at at the opcode (0x0001 for request)
+const ARP_SEQUENCE        = [0x08, 0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01]
+# The slice the above sequence is found in
+const ARP_SEQUENCE_SLICE  = 13:22
+# The slice the source address is found in
+const ARP_SRC_SLICE       = 29:32
+# The slice the destination address is found in
+const ARP_DEST_SLICE      = 39:42
+
+"""
+Await an arp beacon from the source address, return nothing if timeout is reached, otherwise return the data
+"""
+function await_arp_beacon(ip::IPv4Addr, target::UInt8, timeout::Int64=5)
+    # Get a fresh socket to listen on
+    socket = get_socket(AF_PACKET, SOCK_RAW, ETH_P_ALL)
+    heard = Vector{UInt8}()
+    @debug "Started listening @" time() timeout
+    start = time_ns()
+    while (time_ns() - start) < timeout * 1e9
+        # Read a packet
+        raw = read(socket)
+        # Confirm it is more than the mininum size of an ARP packet
+        if length(raw) >= 42
+            # Check it matches our boilerplate ARP
+            if raw[ARP_SEQUENCE_SLICE] == ARP_SEQUENCE
+                # Check it is from the source we are looking for
+                if raw[ARP_SRC_SLICE] == _to_bytes(ip.host)
+                    # Check it is to the target we are looking for
+                    if raw[ARP_DEST_SLICE][4] == target
+                        return true
+                    end
+                    push!(heard, raw[ARP_DEST_SLICE][4])
+                end
+            end
+        end
+    end
+    @warn "Timed out waiting for ARP beacon" heard_ips="10.20.30." .* string.(Int.(heard))
+    return false
+end
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/environment/bpf.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+# Berkley packet filter allows a userspace program to apply a filter to packets
+
+# https://github.com/torvalds/linux/blob/master/samples/bpf/bpf_insn.h
+
+struct bpf_insn
+    code::Cushort
+    jt::Cuchar
+    jf::Cuchar
+    k::Clong
+end
+
+struct bpf_prog
+    len::Cuint
+    insns::Ptr{bpf_insn}
+end
+
+function local_bound_traffic(local_ip::String)::String
+    return "dst host $local_ip"
+end
+local_bound_traffic() = local_bound_traffic(get_local_ip())
+
+function pcap_setfilter(p::Ptr{Pcap}, fp::Ref{bpf_prog})
+    ccall((:pcap_setfilter, "libpcap"), Cint, (Ptr{Cvoid}, Ref{bpf_prog}), p, fp)
+end
+
+function pcap_compile(p::Ptr{Pcap}, fp::Ref{bpf_prog}, str::String, optimize::Cint, netmask::Cuint)
+    ccall((:pcap_compile, "libpcap"), Cint, (Ptr{Cvoid}, Ref{bpf_prog}, Ptr{Cchar}, Cint, Cuint), p, fp, str, optimize, netmask)
+end
+
+function pcap_freecode(fp::Ref{bpf_prog})
+    ccall((:pcap_freecode, "libpcap"), Cvoid, (Ref{bpf_prog},), fp)
+end
+
+# Move these functions to environment, and allow for a filter to be passed to init_queue
+
+# Only allow packets from $local_ip
+
+# p = pcap_open_live(...)
+# program = Ref{bpf_prog}()
+# pcap_compile(p, program, "src host $local_ip", 1, 0)
+# pcap_setfilter(p, program)
+# pcap_freecode(program)
+# pcap_loop(...)
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/target.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+using StaticArrays
+
+# This struct is the basis of our "Agreement"
+struct Target
+    # The IP of the target (receiver)
+    ip::IPv4Addr
+    # The methods to use
+    covert_methods::Vector{String}
+    # The AES PSK and IV
+    AES_PSK::Vector{UInt8}
+    AES_IV::Vector{UInt8}
+    function Target(ip::IPv4Addr, covert_methods::Vector{String}, AES_PSK::SVector{16, UInt8}, AES_IV::SVector{16, UInt8})
+        return new(ip, covert_methods, Vector{UInt8}(AES_PSK), Vector{UInt8}(AES_IV))
+    end
+end
+function Target(ip::AbstractString, covert_methods::Vector{String}, AES_PSK::SVector{16, UInt8}, AES_IV::SVector{16, UInt8})
+    return Target(IPv4Addr(ip), covert_methods, AES_PSK, AES_IV)
+end
+
+chunk(s::AbstractString, n::Int)::Vector{AbstractString} = [s[i:min(i + n - 1, end)] for i=1:n:length(s)]
+
+"""
+Parse target from file structure to Target struct
+```
+Target file structure:
+ip: 'aaa.bbb.ccc.ddd'
+covert_methods: ['method1', 'method2', ...]
+AES_PSK: '000102030405060708090A0B0C0D0E0F'
+AES_IV: '000102030405060708090A0B0C0D0E0F'
+```
+"""
+function parse_target_file(file::AbstractString)::Target
+    target = Dict{String, String}([attr => value for (attr, value) ∈ split.(split(readchomp(file), "\n"), ": ")])
+    # Check all required keys are present, any others will be ignored
+    if all(["ip", "covert_methods", "AES_PSK", "AES_IV"] .∉ Ref(keys(target)))
+        @error "Invalid arguments" keys(target)
+        throw(ArgumentError("Target file must contain ip, covert_methods, AES_PSK, and AES_IV"))
+    end
+
+    # extract the values from the text form, using the ' delimiter
+    ip = split(target["ip"], "'")[2]
+    covert_methods = String.(split(split(split(target["covert_methods"], "['")[2], "']")[1], "', '"))
+    AES_PSK = SVector{16, UInt8}(parse.(UInt8, chunk(split(target["AES_PSK"], "'")[2], 2); base=16))
+    AES_IV = SVector{16, UInt8}(parse.(UInt8, chunk(split(target["AES_IV"], "'")[2], 2); base=16))
+    
+    # Return the target
+    return Target(ip, covert_methods, AES_PSK, AES_IV)
+end
+
+# Get the target file from the arguments
+if length(ARGS) > 0
+    target = parse_target_file(ARGS[1])
+else
+    error("No target file provided")
+end
+
+# Example target file
+"""
+ip: '10.20.30.2'
+covert_methods: ['IPv4_identification', 'TCP_ACK_Bounce']
+AES_PSK: '0F0E0D0C0B0A09080706050403020100'
+AES_IV: '000102030405060708090A0B0C0D0E0F'
+"""
+
+\end{lstlisting}
+\section{FaucetEnv/Faucet/src/main.jl}
+\begin{lstlisting}[language=JuliaLocal, style=julia]
+#=
+
+    Main
+
+    Setup modules, including the files from inside the module folder
+
+=#
+
+# Convert to argument
+PADDING_METHOD = :covert
+
+include("CircularChannel.jl")
+include("constants.jl")
+include("utils.jl")
+include("target.jl")
+
+module Environment
+
+    using .Main: Layer_type, get_ip_from_dev, IPv4Addr, _to_bytes, CircularChannel, ENVIRONMENT_QUEUE_SIZE
+    
+    export init_queue
+
+    include("environment/headers.jl")
+    include("environment/query.jl")
+    include("environment/bpf.jl")
+    include("environment/queue.jl")
+    include("environment/env_utils.jl")
+
+end
+
+module CovertChannels
+
+    using .Main: Layer_type, IPv4, Network_Type, TCP, Transport_Type, CircularChannel, MINIMUM_CHANNEL_SIZE
+    using ..Environment: Packet, get_tcp_server, get_queue_data, get_layer_stats, get_header, get_local_host_count
+
+    export covert_methods
+
+    include("covert_channels/covert_channels.jl")
+    include("covert_channels/microprotocols.jl")
+    
+end
+
+module Outbound
+
+    using .Main: Target, target, IPv4Addr, Network_Type, Transport_Type, Link_Type, Ethernet, IPv4, TCP, UDP, ARP, to_bytes, ip_address_regex, ip_route_regex, ip_neigh_regex, mac, to_net, _to_bytes, integrity_check, PADDING_METHOD, remove_padding, CircularChannel
+    using ..CovertChannels: craft_change_method_payload, craft_discard_chunk_payload, craft_sentinel_payload, craft_recovery_payload, method_calculations, determine_method, covert_method, init, encode
+    using ..Environment: Packet, get_socket, sendto, await_arp_beacon, get_local_net_host, AF_PACKET, SOCK_RAW, ETH_P_ALL, IPPROTO_RAW
+
+    include("outbound/environment.jl")
+    include("outbound/packets.jl")
+
+end
+
+module Inbound
+
+    using .Main: MINIMUM_CHANNEL_SIZE, target, integrity_check, IPv4Addr, PADDING_METHOD, remove_padding, CircularChannel
+    using ..Environment: init_queue, local_bound_traffic, Packet, get_local_ip
+    using ..CovertChannels: SENTINEL, DISCARD_CHUNK, couldContainMethod, decode, covert_method, extract_method
+    using ..Outbound: ARP_Beacon
+
+    include("inbound/listen.jl")
+
+end
+
+\end{lstlisting}

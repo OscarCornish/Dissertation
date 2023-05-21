@@ -364,9 +364,9 @@ The common approach to adding bits of padding is to append the data with a 1 and
 
 In this paper I will propose a solution that is better suited to covert channels, it does have a higher space cost, however, the benefit is more of the data is random, and sometimes the proficiency of a protocol must be sacrificed in favour of covertness \citep{oCDCCEDNA}. The cost is logarithmically proportional to the size of the data, although if the data has fixed size increments (a common one would be bytes as most payloads will be byte data) then the length can be divided by this number to reduce its costs. In my case, the AES encryption means that the data is a multiple of the key size (128 bits) so the equation of my cost complexity would be $log_2(l/128)$ where $l$ is the length of the encrypted data.
 
-\begin{figure}
+\begin{figure}[h]
     \centering
-    \includegraphics{fig/Padding_diagram.pdf}
+    \includegraphics[width=0.8\textwidth]{fig/Padding_diagram.pdf}
     \caption{Padding diagram}
     \label{fig:padding_diagram}
 \end{figure}

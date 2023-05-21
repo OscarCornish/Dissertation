@@ -5,52 +5,50 @@ This chapter tests and evaluates the produced framework against the objectives a
 \section{Recovering from a communication channel failure}
 \label{sec:failure_recovery}
 
-Communication failure can be caused by a variety of factors, but the most important to the covert system is communication prevention by an adversary, especially in applications like censorship resistance.
+Communication failure can be caused by a variety of factors, but the most important to the covert system are caused by an adversary, especially in applications like censorship resistance.
 
-In order to mimic an adversary I wrote a script that acts like an active warden (see \fullref{sec:filter_py} for implementation details), this script can block either one of the channels, or both. The script works by hooking into IPTables using a NetFilter queue, where it can drop and alter packets with the assistance of scapy \citep{scapy}. The script is rudimentary in its current state, as I do not have actual traffic to worry about disrupting, I can nullify header fields at my discretion. While the script sets the acknowledgement number to 0, in real-world application it would map these values similar to Network Address Translation.
+I wrote a script to mimic an active warden (see \fullref{sec:filter_py} for implementation details), this script can block either one of the channels, or both. The script works by hooking into IPTables using a NetFilter queue, where it can drop and alter packets with the assistance of scapy \citep{scapy}. The script is rudimentary in its current state, as I do not have actual traffic to worry about disrupting, I can nullify header fields at my discretion. While the script sets the acknowledgement number to 0, in real-world application it would map these values in a fashion similar to that of Network Address Translation.
 
 The clearest way to show this in action is to look at the script output during this process, to mimic this scenario I created the \url{FaucetEnv/Commblock} script, which calls the warden script (appendix \ref{sec:filter_py}).
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{fig/TCP_Failure.png}
+    \includegraphics[width=\textwidth]{fig/TCP_Failure.png}
     \caption{TCP Channel failure}
     \label{fig:TCP_Failure}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{fig/TCP_Fail_into_rec.png}
+    \includegraphics[width=0.9\textwidth]{fig/TCP_Fail_into_rec.png}
     \caption{TCP Channel fails again, starting the recovery process}
     \label{fig:TCP_Failure_again}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{fig/Recv_rec_resp.png}
+    \includegraphics[width=0.9\textwidth]{fig/Recv_rec_resp.png}
     \caption{The receiver "recovers" to this new channel}
     \label{fig:recovery}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{fig/Comm_works.png}
+    \includegraphics[width=\textwidth]{fig/Comm_works.png}
     \caption{Communication is restored, and successful}
     \label{fig:successful_comms}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{fig/DEBUG_SHOW_WARDEN.png}
+    \includegraphics[width=0.9\textwidth]{fig/DEBUG_SHOW_WARDEN.png}
     \caption{The affect of the warden script on the packets}
     \label{fig:warden_affect}
 \end{figure}
 
-Running the testing script we can see that communication initially is unsuccessful (figure \ref{fig:TCP_Failure}), however, once the sender fails twice in a row with the same protocol, it blacklists the protocol and enters recovery mode (figure \ref{fig:TCP_Failure_again}). The sender waits before going into recovery mode to ensure the receiver is also in recovery mode (How these times are decided is outlined in \fullref{sec:channel_failures}). Once it sends the recovery packet to the receiver, the receiver will "recover" onto this new channel, that It knows is valid (figure \ref{fig:recovery}). Once the receiver has recovered, communication will continue as normal (although the original channel will remain blacklisted, and thus is unlikely to be used for a specified period). This can be seen in figure \ref{fig:successful_comms}.
+Running the testing script we can see that communication initially is unsuccessful (figure \ref{fig:TCP_Failure}), however, once the sender fails twice in a row with the same protocol, it blacklists the protocol and enters recovery mode (figure \ref{fig:TCP_Failure_again}). The sender waits before going into recovery mode to ensure the receiver is also in recovery mode. How these times are decided is outlined in \fullref{sec:channel_failures}. Once it sends the recovery packet to the receiver, the receiver will "recover" onto this new channel, that it knows is valid (figure \ref{fig:recovery}). Once the receiver has recovered, communication will continue as normal (although the original channel will remain blacklisted, and thus is unlikely to be used for a specified period). This can be seen in figure \ref{fig:successful_comms}.
 
 By enabling the debug flag on the warden script, we can see how the warden affects the packets (figure \ref{fig:warden_affect}), where the acknowledgement field is set to 0.
-
-\clearpage
 
 This example shows that the framework can successfully recover from a communication channel failure, however, failures are not always as clear and simple as this, I doubt this approach is robust enough to handle all failures, but it does show it is possible. Managing the quality of channels is a complex task, but it would improve the availability of the system, especially when the environment is unreliable. This is an area that could be improved in future work.
 
@@ -215,7 +213,7 @@ However the requirement:
 
 The \textit{\textbf{MAY}} requirement:
 
-"[The framework can] handle multiple channels at a time" is also not met, The additional complexity of this requirement is not worth the benefit, although if only direct channels (Ones that go straight from the sender to the receiver) are used, the receiver could reasonably handle multiple channels by tracking the source of the packets, however, this would prevent the use of some channels, such as the TCP Acknowledgement bounce that I utilise in this paper.
+"[The framework can] handle multiple channels at a time" is also not met. The additional complexity of this requirement is not worth the benefit, although if only direct channels (Ones that go straight from the sender to the receiver) are used, the receiver could reasonably handle multiple channels by tracking the source of the packets. However, this would prevent the use of some channels, such as the TCP Acknowledgement bounce that I utilise in this paper.
 
 \section{Evaluation of non-functional requirements}
 
@@ -236,7 +234,7 @@ Writing a script to identify the channel is simple, however, identifying only th
     \label{fig:warden_output}
 \end{figure}
 
-This script does not represent the true covertness of the channel well, as it assumes the sender knows the channels in the communication, it also assumes the sentinel value, but there is no reason why the sentinel value could not be changed, for example, the ones compliment could be applied to all the encoded data, this would mean that the sentinel value would be 0000, which would evade this form of detection.
+This script does not represent the true covertness of the channel well, as it assumes the sender knows the channels in the communication. it also assumes the sentinel value, but there is no reason why the sentinel value could not be changed. For example, one's complement could be applied to all the encoded data, flipping all the bits, this would mean that the sentinel value would be 0000, which would evade this form of detection with no performance loss (but it would have to be agreed beforehand).
 
 This type of warden also fails to properly detect the TCP Acknowledgement bounce channel, as the script sees the acknowledgement from the bouncing server, as opposed to the sender, which makes correctly identifying the start/end of a channel incredibly difficult.
 
@@ -250,7 +248,7 @@ For a more accurate warden, it would have to be aware of the following:
 
 This is a difficult task, but perhaps could be done using a machine learning approach, where the warden is trained on a set of known channels, and then tested on an unknown channel. This would be a good area for future work.
 
-To conclude this evaluation, it is easy to identify a possible covert channel, however, it is incredibly hard to identify the channel with certainty, even when the warden has knowledge of the implementation, regardless of whether this is possible retrospectively, it requires the channel to have already ended to be identifiable, and the solution is not linear in complexity, as the number of channels increases, the number of possible combinations increases exponentially. So the channel cannot be identified with certainty in real-time, or possibly at all, meaning it is incredibly covert.
+To conclude this evaluation, it is easy to identify a possible covert channel, however, it is incredibly hard to identify the channel with certainty, even when the warden has knowledge of the implementation. Regardless of whether detection is possible retrospectively, it would require the channel to have already ended for communication to be identifiable. additionally, the solution for finding a channel is not of linear complexity, as the number of channels increases, the number of possible combinations increases exponentially. So the channel cannot be identified with certainty in real-time, or possibly at all, meaning it is incredibly covert.
 
 \subsection{Application of the framework to real-world scenarios}
 
